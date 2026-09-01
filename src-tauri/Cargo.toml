@@ -1,0 +1,28 @@
+[package]
+name = "sysmon-tray"
+version = "0.1.0"
+description = "System monitor tray app"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "sysmon_tray_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = "0.37"
+dirs = "6"
+tauri-plugin-notification = "2"
+# 仅本机 HTTP；关闭默认 TLS，减小体积。gzip：LHM 可能压缩响应；json：解析 data.json
+ureq = { version = "3.4", default-features = false, features = ["gzip", "json"] }
+tauri-plugin-autostart = "2.5.1"
+
+[target.'cfg(windows)'.dependencies]
+wmi = { version = "0.17", default-features = false }

@@ -46,3 +46,7 @@ src-tauri/gen/schemas
 # Prettier / cache
 .prettiercache
 .cache
+
+# VSCode settings
+/.vscode/
+./AGENTS.md

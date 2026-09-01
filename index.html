@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>系统监测</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <main class="panel">
+      <header class="panel-header">
+        <h1>系统监测</h1>
+        <span id="updated-at" class="muted">--</span>
+      </header>
+
+      <nav class="tabs" role="tablist">
+        <button
+          type="button"
+          class="tab active"
+          data-tab="monitor"
+          role="tab"
+          aria-selected="true"
+          aria-controls="view-monitor"
+        >
+          监测
+        </button>
+        <button
+          type="button"
+          class="tab"
+          data-tab="settings"
+          role="tab"
+          aria-selected="false"
+          aria-controls="view-settings"
+        >
+          设置
+        </button>
+      </nav>
+
+      <div id="view-monitor" class="view" role="tabpanel">
+        <div id="alert-banner" class="alert-banner" hidden><span></span></div>
+
+        <div class="hero-grid">
+          <section id="cpu-card" class="metric-card primary-metric">
+            <div class="metric-top">
+              <span class="metric-label">CPU</span>
+              <span id="cpu-value" class="metric-value">--%</span>
+            </div>
+            <div class="progress"><div id="cpu-bar" class="progress-bar"></div></div>
+            <div id="cpu-temp" class="metric-sub muted">温度：暂不可用</div>
+          </section>
+
+          <section id="mem-card" class="metric-card primary-metric">
+            <div class="metric-top">
+              <span class="metric-label">内存</span>
+              <span id="mem-value" class="metric-value">--%</span>
+            </div>
+            <div class="progress"><div id="mem-bar" class="progress-bar"></div></div>
+            <div id="mem-detail" class="metric-sub muted">-- / --</div>
+          </section>
+        </div>
+
+        <section class="metric-card chart-card">
+          <div class="metric-top">
+            <span class="metric-label">历史曲线</span>
+            <span class="chart-legend">
+              <span class="legend-item cpu">CPU</span>
+              <span class="legend-item mem">内存</span>
+              <span class="legend-item temp" id="temp-legend">温度</span>
+            </span>
+          </div>
+          <canvas id="history-chart" width="300" height="112"></canvas>
+          <div class="chart-meta">
+            <div id="chart-hint" class="metric-sub muted">最近约 1 分钟</div>
+            <div class="chart-readings">
+              <span class="cpu" id="chart-cpu-reading">CPU --</span>
+              <span class="mem" id="chart-mem-reading">内存 --</span>
+              <span class="temp" id="chart-temp-reading" hidden>温度 --</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="metric-card compact-card">
+          <div class="metric-top">
+            <span class="metric-label">网络</span>
+          </div>
+          <div class="net-row">
+            <div class="net-cell">
+              <div class="muted">下载</div>
+              <div id="net-down" class="metric-value small">--</div>
+            </div>
+            <div class="net-cell">
+              <div class="muted">上传</div>
+              <div id="net-up" class="metric-value small">--</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="metric-card compact-card">
+          <div class="metric-top">
+            <span class="metric-label">磁盘</span>
+          </div>
+          <div id="disk-list" class="disk-list muted">加载中...</div>
+        </section>
+      </div>
+
+      <div id="view-settings" class="view" role="tabpanel" hidden>
+        <form id="settings-form" class="settings-form">
+          <section class="metric-card settings-card">
+            <div class="metric-top">
+              <span class="section-title">告警阈值</span>
+            </div>
+            <div class="settings-group settings-grid">
+              <label class="field">
+                <span class="field-label">CPU（%）</span>
+                <input id="setting-cpu" type="number" min="1" max="100" step="1" required />
+              </label>
+
+              <label class="field">
+                <span class="field-label">内存（%）</span>
+                <input id="setting-memory" type="number" min="1" max="100" step="1" required />
+              </label>
+
+              <label class="field">
+                <span class="field-label">温度（°C）</span>
+                <input id="setting-temp" type="number" min="40" max="120" step="1" required />
+              </label>
+
+              <label class="field">
+                <span class="field-label">冷却（秒）</span>
+                <input
+                  id="setting-cooldown"
+                  type="number"
+                  min="5"
+                  max="3600"
+                  step="1"
+                  required
+                />
+              </label>
+            </div>
+          </section>
+
+          <section class="metric-card settings-card">
+            <div class="metric-top">
+              <span class="section-title">通知与显示</span>
+            </div>
+            <div class="settings-group">
+              <label class="field switch-field">
+                <span class="field-label">启用系统通知</span>
+                <span class="toggle">
+                  <input id="setting-notification" type="checkbox" checked />
+                  <span class="toggle-track"></span>
+                </span>
+              </label>
+
+              <label class="field switch-field">
+                <span class="field-label">启用叠加层</span>
+                <span class="toggle">
+                  <input id="setting-overlay" type="checkbox" />
+                  <span class="toggle-track"></span>
+                </span>
+              </label>
+
+              <label class="field switch-field">
+                <span class="field-label">开机自启</span>
+                <span class="toggle">
+                  <input id="setting-autostart" type="checkbox" />
+                  <span class="toggle-track"></span>
+                </span>
+              </label>
+
+              <label class="field switch-field">
+                <span class="field-label">叠加层贴边自动隐藏</span>
+                <span class="toggle">
+                  <input id="setting-overlay-auto-hide" type="checkbox" />
+                  <span class="toggle-track"></span>
+                </span>
+              </label>
+
+              <label class="field">
+                <span class="field-label">叠加层形态</span>
+                <select id="setting-overlay-style">
+                  <option value="capsule">胶囊细条</option>
+                  <option value="vertical">竖条</option>
+                  <option value="numeric">纯数值条</option>
+                </select>
+              </label>
+
+              <label class="field">
+                <span class="field-label">历史时长</span>
+                <select id="setting-history-range">
+                  <option value="1">1 分钟</option>
+                  <option value="5">5 分钟</option>
+                  <option value="15">15 分钟</option>
+                  <option value="60">60 分钟</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <section class="metric-card settings-card">
+            <div class="metric-top">
+              <span class="section-title">精确温度</span>
+            </div>
+            <div class="settings-group">
+              <label class="field switch-field">
+                <span class="field-label">LibreHardwareMonitor</span>
+                <span class="toggle">
+                  <input id="setting-precise-temp" type="checkbox" />
+                  <span class="toggle-track"></span>
+                </span>
+              </label>
+
+              <label class="field">
+                <span class="field-label">LHM Web 地址</span>
+                <input
+                  id="setting-lhm-url"
+                  type="text"
+                  spellcheck="false"
+                  autocomplete="off"
+                  placeholder="http://127.0.0.1:8085"
+                />
+              </label>
+
+              <div id="temp-source-status" class="settings-hint muted">状态：--</div>
+              <button type="button" class="hint-toggle">了解更多</button>
+              <p class="settings-hint collapsible muted">
+                需本机运行 LibreHardwareMonitor 并开启 Remote Web Server；本应用不捆绑驱动，失败时自动回退 ACPI/WMI。
+              </p>
+            </div>
+          </section>
+
+          <div id="settings-message" class="settings-message muted" hidden></div>
+
+          <div class="settings-actions">
+            <button type="submit" id="btn-save-settings" class="btn primary">保存</button>
+            <button type="button" id="btn-reset-settings" class="btn">恢复默认</button>
+          </div>
+        </form>
+      </div>
+    </main>
+  </body>
+</html>

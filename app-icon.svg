@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="55%" stop-color="#0ea5e9"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+    <linearGradient id="arc" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#22c55e"/>
+      <stop offset="55%" stop-color="#38bdf8"/>
+      <stop offset="85%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#ef4444"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="48%" r="48%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.28"/>
+      <stop offset="55%" stop-color="#0ea5e9" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#0ea5e9" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Rounded app background -->
+  <rect x="48" y="48" width="928" height="928" rx="220" fill="url(#bg)"/>
+  <rect x="48" y="48" width="928" height="928" rx="220" fill="url(#glow)"/>
+  <rect x="64" y="64" width="896" height="896" rx="208" fill="none" stroke="url(#ring)" stroke-width="10" opacity="0.55"/>
+
+  <!-- Outer gauge ring -->
+  <circle cx="512" cy="540" r="292" fill="none" stroke="#1e293b" stroke-width="56"/>
+  <circle cx="512" cy="540" r="292" fill="none" stroke="#334155" stroke-width="8"/>
+
+  <!-- Colored gauge arc (about 240 degrees) -->
+  <path
+    d="M 260 680 A 292 292 0 1 1 764 680"
+    fill="none"
+    stroke="url(#arc)"
+    stroke-width="44"
+    stroke-linecap="round"
+    filter="url(#softGlow)"
+  />
+
+  <!-- Tick marks -->
+  <g stroke="#e2e8f0" stroke-linecap="round" opacity="0.85">
+    <line x1="512" y1="278" x2="512" y2="318" stroke-width="10"/>
+    <line x1="300" y1="392" x2="330" y2="418" stroke-width="8"/>
+    <line x1="724" y1="392" x2="694" y2="418" stroke-width="8"/>
+    <line x1="268" y1="560" x2="308" y2="560" stroke-width="8"/>
+    <line x1="756" y1="560" x2="716" y2="560" stroke-width="8"/>
+    <line x1="340" y1="720" x2="368" y2="692" stroke-width="8"/>
+    <line x1="684" y1="720" x2="656" y2="692" stroke-width="8"/>
+  </g>
+
+  <!-- Needle -->
+  <g filter="url(#softGlow)">
+    <polygon points="512,300 528,540 496,540" fill="#f8fafc"/>
+    <polygon points="512,300 520,540 504,540" fill="#38bdf8"/>
+  </g>
+
+  <!-- Hub -->
+  <circle cx="512" cy="540" r="46" fill="#0f172a" stroke="#38bdf8" stroke-width="10"/>
+  <circle cx="512" cy="540" r="18" fill="#38bdf8"/>
+
+  <!-- Mini waveform under gauge for monitor feel -->
+  <path
+    d="M 300 820 L 360 790 L 410 845 L 470 760 L 530 810 L 590 740 L 650 800 L 724 770"
+    fill="none"
+    stroke="#38bdf8"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    opacity="0.9"
+  />
+</svg>

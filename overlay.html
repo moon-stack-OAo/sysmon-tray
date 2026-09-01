@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/overlay.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>系统监测叠加层</title>
+    <script type="module" src="/src/overlay.ts" defer></script>
+  </head>
+  <body>
+    <main id="overlay-root" class="overlay collapsed" data-tauri-drag-region>
+      <div id="peek-bar" class="peek-bar" data-tauri-drag-region title="移入展开"></div>
+
+      <div class="strip" data-tauri-drag-region>
+        <span id="strip-alert" class="strip-dot danger" hidden></span>
+
+        <span class="strip-metric" data-metric="cpu" data-tauri-drag-region>
+          <span class="strip-dot" id="strip-cpu-dot"></span>
+          <span class="strip-k">CPU</span>
+          <span id="strip-cpu" class="strip-v">--%</span>
+        </span>
+        <span class="strip-sep" data-tauri-drag-region></span>
+
+        <span class="strip-metric" data-metric="mem" data-tauri-drag-region>
+          <span class="strip-dot" id="strip-mem-dot"></span>
+          <span class="strip-k">内存</span>
+          <span id="strip-mem" class="strip-v">--%</span>
+        </span>
+        <span class="strip-sep" data-tauri-drag-region></span>
+
+        <span class="strip-metric" data-metric="temp" data-tauri-drag-region>
+          <span class="strip-dot" id="strip-temp-dot"></span>
+          <span class="strip-k">温度</span>
+          <span id="strip-temp" class="strip-v">--</span>
+        </span>
+        <span class="strip-sep" data-tauri-drag-region></span>
+
+        <span class="strip-metric strip-net" data-tauri-drag-region>
+          <span class="strip-k accent">↓</span>
+          <span id="strip-net-down" class="strip-v">--</span>
+          <span class="strip-k accent">↑</span>
+          <span id="strip-net-up" class="strip-v">--</span>
+        </span>
+
+        <button type="button" id="btn-expand" class="icon-btn" title="展开" aria-label="展开">
+          <span class="chevron down"></span>
+        </button>
+      </div>
+
+      <div class="numeric-strip" data-tauri-drag-region>
+        <span id="num-cpu" class="num-v">--</span>
+        <span class="num-sep">/</span>
+        <span id="num-mem" class="num-v">--</span>
+        <span class="num-sep">/</span>
+        <span id="num-temp" class="num-v">--</span>
+        <span class="num-sep">·</span>
+        <span id="num-net" class="num-v net">↓-- ↑--</span>
+        <button type="button" id="btn-expand-num" class="icon-btn" title="展开" aria-label="展开">
+          <span class="chevron down"></span>
+        </button>
+      </div>
+
+      <div class="vertical-strip" data-tauri-drag-region>
+        <div class="v-item" data-metric="cpu" data-tauri-drag-region>
+          <span class="v-k">CPU</span>
+          <span id="v-cpu" class="v-v">--%</span>
+        </div>
+        <div class="v-item" data-metric="mem" data-tauri-drag-region>
+          <span class="v-k">内存</span>
+          <span id="v-mem" class="v-v">--%</span>
+        </div>
+        <div class="v-item" data-metric="temp" data-tauri-drag-region>
+          <span class="v-k">温度</span>
+          <span id="v-temp" class="v-v">--</span>
+        </div>
+        <div class="v-item net" data-tauri-drag-region>
+          <span class="v-k">网络</span>
+          <span id="v-net" class="v-v sm">↓--</span>
+          <span id="v-net-up" class="v-v sm">↑--</span>
+        </div>
+        <button type="button" id="btn-expand-v" class="icon-btn" title="展开" aria-label="展开">
+          <span class="chevron down"></span>
+        </button>
+      </div>
+
+      <div class="panel-view">
+        <header class="panel-header" data-tauri-drag-region>
+          <span class="panel-title" data-tauri-drag-region>系统监测</span>
+          <span id="overlay-alert-flag" class="panel-flag" hidden>告警</span>
+          <span id="overlay-updated" class="panel-time" data-tauri-drag-region>--</span>
+          <button type="button" id="btn-collapse" class="icon-btn" title="收起" aria-label="收起">
+            <span class="chevron up"></span>
+          </button>
+        </header>
+
+        <section class="meter-list">
+          <div id="ov-cpu-card" class="meter-row">
+            <div class="meter-top">
+              <span class="meter-label">CPU</span>
+              <span id="ov-cpu" class="meter-value">--%</span>
+            </div>
+            <div class="meter-track">
+              <div id="ov-cpu-bar" class="meter-fill"></div>
+            </div>
+          </div>
+
+          <div id="ov-mem-card" class="meter-row">
+            <div class="meter-top">
+              <span class="meter-label">内存</span>
+              <span id="ov-mem" class="meter-value">--%</span>
+            </div>
+            <div class="meter-track">
+              <div id="ov-mem-bar" class="meter-fill"></div>
+            </div>
+          </div>
+
+          <div id="ov-temp-card" class="meter-row">
+            <div class="meter-top">
+              <span class="meter-label">温度</span>
+              <span id="ov-temp" class="meter-value">--</span>
+            </div>
+            <div class="meter-track">
+              <div id="ov-temp-bar" class="meter-fill"></div>
+            </div>
+          </div>
+
+          <div class="meter-row net-row">
+            <div class="net-cell">
+              <span class="meter-label">下载</span>
+              <span id="ov-net-down" class="meter-value sm">--</span>
+            </div>
+            <div class="net-cell">
+              <span class="meter-label">上传</span>
+              <span id="ov-net-up" class="meter-value sm">--</span>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>

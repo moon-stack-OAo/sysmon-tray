@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Resolve version and changelog notes
+        id: notes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $pkg = Get-Content -Raw -LiteralPath "package.json" | ConvertFrom-Json
+          $version = [string]$pkg.version
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "package.json 缺少 version"
+          }
+
+          $tauri = Get-Content -Raw -LiteralPath "src-tauri/tauri.conf.json" | ConvertFrom-Json
+          $tauriVersion = [string]$tauri.version
+          if ($tauriVersion -ne $version) {
+            throw "版本不一致：package.json=$version, tauri.conf.json=$tauriVersion"
+          }
+
+          $cargoLine = Select-String -LiteralPath "src-tauri/Cargo.toml" -Pattern '^\s*version\s*=\s*"([^"]+)"' |
+            Select-Object -First 1
+          if (-not $cargoLine) {
+            throw "无法从 src-tauri/Cargo.toml 读取 version"
+          }
+          $cargoVersion = $cargoLine.Matches[0].Groups[1].Value
+          if ($cargoVersion -ne $version) {
+            throw "版本不一致：package.json=$version, Cargo.toml=$cargoVersion"
+          }
+
+          $changelog = Get-Content -Raw -LiteralPath "CHANGELOG.md"
+          $escaped = [regex]::Escape($version)
+          # 截到下一版本标题，或 Keep a Changelog 底部链接引用区
+          $pattern = "(?ms)^## \[$escaped\]\s*\r?\n(.*?)(?=^## \[|^\[|\z)"
+          $match = [regex]::Match($changelog, $pattern)
+
+          $builder = New-Object System.Text.StringBuilder
+          [void]$builder.AppendLine("## 下载")
+          [void]$builder.AppendLine("")
+          [void]$builder.AppendLine("- Windows 安装包（NSIS / MSI）见下方 Assets")
+          [void]$builder.AppendLine("- 也可直接使用便携版 ``sysmon-tray.exe``")
+          [void]$builder.AppendLine("")
+
+          if ($match.Success) {
+            $section = $match.Groups[1].Value.Trim()
+            [void]$builder.AppendLine("## 变更说明")
+            [void]$builder.AppendLine("")
+            [void]$builder.AppendLine($section)
+          } else {
+            Write-Warning "CHANGELOG.md 未找到 ## [$version] 段落，Release 将仅附下载说明"
+            [void]$builder.AppendLine("## 变更说明")
+            [void]$builder.AppendLine("")
+            [void]$builder.AppendLine("未在 ``CHANGELOG.md`` 中找到 ``## [$version]`` 段落，请查看仓库根目录 ``CHANGELOG.md``。")
+          }
+
+          [void]$builder.AppendLine("")
+          [void]$builder.AppendLine("完整记录见仓库根目录 ``CHANGELOG.md``。")
+
+          $body = $builder.ToString().TrimEnd() + "`n"
+
+          # GitHub Actions multiline output
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "body<<EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $body | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8 -NoNewline
+          "EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+          Write-Host "Release version: $version"
+          Write-Host "----- release body preview -----"
+          Write-Host $body
+
+      - name: Build Tauri app (Windows)
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: 系统监测 v__VERSION__
+          releaseBody: ${{ steps.notes.outputs.body }}
+          releaseDraft: true
+          prerelease: false
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sysmon-tray-windows
+          path: |
+            src-tauri/target/release/sysmon-tray.exe
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: warn
