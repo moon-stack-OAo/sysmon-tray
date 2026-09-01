@@ -24,12 +24,12 @@
 
 ### 实时监测（约 1 秒刷新）
 
-| 监测项    | 说明                                                     |
-|--------|--------------------------------------------------------|
-| CPU    | 占用率 + 进度条                                              |
-| 内存     | 占用率、已用/总量 + 进度条                                        |
-| 网络     | 下行 / 上行速率（自适应单位）                                       |
-| 磁盘     | 各盘占用情况（最多展示 4 块）                                       |
+| 监测项   | 说明                                                                           |
+| -------- | ------------------------------------------------------------------------------ |
+| CPU      | 占用率 + 进度条                                                                |
+| 内存     | 占用率、已用/总量 + 进度条                                                     |
+| 网络     | 下行 / 上行速率（自适应单位）                                                  |
+| 磁盘     | 各盘占用情况（最多展示 4 块）                                                  |
 | CPU 温度 | 有值显示 °C 与来源后缀（`LHM` / `ACPI` / `sysinfo`）；读不到则提示「暂不可用」 |
 
 后端对指标有约 700ms 短时缓存，避免主面板与叠加层同时拉取时打乱网速差分。
@@ -67,14 +67,14 @@
 
 ## 技术栈
 
-| 层           | 技术                                                              |
-|-------------|-----------------------------------------------------------------|
-| 桌面框架        | Tauri 2（`tray-icon`）                                            |
-| 前端          | TypeScript + Vite 6（原生 DOM，双入口：`index.html` / `overlay.html`）   |
-| 后端          | Rust 2021                                                       |
-| 系统信息        | `sysinfo`                                                       |
+| 层              | 技术                                                                       |
+| --------------- | -------------------------------------------------------------------------- |
+| 桌面框架        | Tauri 2（`tray-icon`）                                                     |
+| 前端            | TypeScript + Vite 6（原生 DOM，双入口：`index.html` / `overlay.html`）     |
+| 后端            | Rust 2021                                                                  |
+| 系统信息        | `sysinfo`                                                                  |
 | 温度（Windows） | LibreHardwareMonitor（可选）→ WMI（ACPI / 性能计数器）→ sysinfo Components |
-| 其他          | `tauri-plugin-notification`、`dirs`、`ureq`（本机 HTTP）              |
+| 其他            | `tauri-plugin-notification`、`dirs`、`ureq`（本机 HTTP）                   |
 
 ## 快速开始
 
@@ -88,16 +88,31 @@
 
 ```bash
 npm install
-npm run tauri dev
+npm run tauri:dev
+# 等同于：npm run tauri dev
 ```
 
 开发前端地址：`http://localhost:1420`
+
+常用检查：
+
+```bash
+npm run typecheck      # TypeScript 类型检查
+npm run format         # Prettier 格式化
+npm run format:check   # Prettier 仅检查
+```
 
 ### 构建
 
 ```bash
 npm run build:exe
 # 等同于：npm run tauri build
+```
+
+清理构建产物（`dist` + `src-tauri/target`）：
+
+```bash
+npm run clean
 ```
 
 可执行文件（便携版）：
@@ -109,7 +124,6 @@ src-tauri/target/release/sysmon-tray.exe
 安装包：
 
 ```text
-src-tauri/target/release/bundle/nsis/   # NSIS 安装包 .exe
 src-tauri/target/release/bundle/nsis/   # NSIS 安装包
 ```
 

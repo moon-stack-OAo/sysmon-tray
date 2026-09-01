@@ -8,7 +8,12 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "build:exe": "tauri build"
+    "tauri:dev": "tauri dev",
+    "build:exe": "tauri build",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; for (const p of ['dist', 'src-tauri/target']) rmSync(p, { recursive: true, force: true });\""
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -17,6 +22,7 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
+    "prettier": "^3.9.6",
     "typescript": "~5.6.2",
     "vite": "^6.0.3"
   }

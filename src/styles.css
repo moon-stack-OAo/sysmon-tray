@@ -1,6 +1,6 @@
 :root {
   color-scheme: dark;
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
   font-size: 13px;
   line-height: 1.4;
   background: transparent;
@@ -72,9 +72,7 @@ body {
   flex-direction: column;
   gap: 10px;
   border-radius: var(--radius-xl);
-  background:
-    linear-gradient(180deg, var(--glass-highlight), transparent 28%),
-    var(--glass-bg);
+  background: linear-gradient(180deg, var(--glass-highlight), transparent 28%), var(--glass-bg);
   border: 1px solid var(--glass-border);
   box-shadow:
     0 12px 40px rgba(0, 0, 0, 0.35),
@@ -251,7 +249,8 @@ body {
 .field select {
   cursor: pointer;
   appearance: none;
-  background-image: linear-gradient(45deg, transparent 50%, #9aa6b2 50%),
+  background-image:
+    linear-gradient(45deg, transparent 50%, #9aa6b2 50%),
     linear-gradient(135deg, #9aa6b2 50%, transparent 50%);
   background-position:
     calc(100% - 16px) calc(50% - 2px),
@@ -316,7 +315,7 @@ body {
 }
 
 .toggle-track::after {
-  content: "";
+  content: '';
   position: absolute;
   top: 2px;
   left: 2px;
@@ -645,7 +644,7 @@ body {
 }
 
 .legend-item::before {
-  content: "";
+  content: '';
   width: 8px;
   height: 8px;
   border-radius: 2px;

@@ -37,5 +37,4 @@
 - GitHub Actions Release 工作流产出 Windows NSIS 安装包 / 便携 exe
 
 [Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.0...HEAD
-
 [0.1.0]: https://github.com/moon-stack-OAo/sysmon-tray/releases/tag/v0.1.0
