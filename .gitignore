@@ -49,4 +49,4 @@ src-tauri/gen/schemas
 
 # VSCode settings
 /.vscode/
-./AGENTS.md
+AGENTS.md
