@@ -1,82 +1,65 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+    <linearGradient id="bg" x1="18%" y1="8%" x2="86%" y2="96%">
       <stop offset="0%" stop-color="#1e293b"/>
-      <stop offset="100%" stop-color="#0f172a"/>
+      <stop offset="50%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#020617"/>
     </linearGradient>
-    <linearGradient id="ring" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#38bdf8"/>
-      <stop offset="55%" stop-color="#0ea5e9"/>
-      <stop offset="100%" stop-color="#0284c7"/>
+    <linearGradient id="frame" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7dd3fc"/>
+      <stop offset="100%" stop-color="#0ea5e9"/>
     </linearGradient>
-    <linearGradient id="arc" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#22c55e"/>
-      <stop offset="55%" stop-color="#38bdf8"/>
-      <stop offset="85%" stop-color="#f59e0b"/>
-      <stop offset="100%" stop-color="#ef4444"/>
+    <linearGradient id="bar1" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#0284c7"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
     </linearGradient>
-    <radialGradient id="glow" cx="50%" cy="48%" r="48%">
-      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.28"/>
-      <stop offset="55%" stop-color="#0ea5e9" stop-opacity="0.08"/>
+    <linearGradient id="bar2" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#7c3aed"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+    <linearGradient id="bar3" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#c2410c"/>
+      <stop offset="100%" stop-color="#fb923c"/>
+    </linearGradient>
+    <linearGradient id="pulse" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0"/>
+      <stop offset="35%" stop-color="#38bdf8"/>
+      <stop offset="50%" stop-color="#f8fafc"/>
+      <stop offset="65%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#a78bfa" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="45%" r="45%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.24"/>
       <stop offset="100%" stop-color="#0ea5e9" stop-opacity="0"/>
     </radialGradient>
-    <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%">
-      <feGaussianBlur stdDeviation="10" result="blur"/>
-      <feMerge>
-        <feMergeNode in="blur"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
   </defs>
 
-  <!-- Rounded app background -->
-  <rect x="48" y="48" width="928" height="928" rx="220" fill="url(#bg)"/>
-  <rect x="48" y="48" width="928" height="928" rx="220" fill="url(#glow)"/>
-  <rect x="64" y="64" width="896" height="896" rx="208" fill="none" stroke="url(#ring)" stroke-width="10" opacity="0.55"/>
+  <rect x="64" y="64" width="896" height="896" rx="208" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="208" fill="url(#glow)"/>
+  <rect x="92" y="92" width="840" height="840" rx="184" fill="none" stroke="url(#frame)" stroke-width="24" opacity="0.9"/>
 
-  <!-- Outer gauge ring -->
-  <circle cx="512" cy="540" r="292" fill="none" stroke="#1e293b" stroke-width="56"/>
-  <circle cx="512" cy="540" r="292" fill="none" stroke="#334155" stroke-width="8"/>
-
-  <!-- Colored gauge arc (about 240 degrees) -->
-  <path
-    d="M 260 680 A 292 292 0 1 1 764 680"
-    fill="none"
-    stroke="url(#arc)"
-    stroke-width="44"
-    stroke-linecap="round"
-    filter="url(#softGlow)"
-  />
-
-  <!-- Tick marks -->
-  <g stroke="#e2e8f0" stroke-linecap="round" opacity="0.85">
-    <line x1="512" y1="278" x2="512" y2="318" stroke-width="10"/>
-    <line x1="300" y1="392" x2="330" y2="418" stroke-width="8"/>
-    <line x1="724" y1="392" x2="694" y2="418" stroke-width="8"/>
-    <line x1="268" y1="560" x2="308" y2="560" stroke-width="8"/>
-    <line x1="756" y1="560" x2="716" y2="560" stroke-width="8"/>
-    <line x1="340" y1="720" x2="368" y2="692" stroke-width="8"/>
-    <line x1="684" y1="720" x2="656" y2="692" stroke-width="8"/>
+  <g>
+    <rect x="250" y="430" width="120" height="340" rx="36" fill="url(#bar1)"/>
+    <rect x="452" y="280" width="120" height="490" rx="36" fill="url(#bar2)"/>
+    <rect x="654" y="360" width="120" height="410" rx="36" fill="url(#bar3)"/>
   </g>
 
-  <!-- Needle -->
-  <g filter="url(#softGlow)">
-    <polygon points="512,300 528,540 496,540" fill="#f8fafc"/>
-    <polygon points="512,300 520,540 504,540" fill="#38bdf8"/>
-  </g>
-
-  <!-- Hub -->
-  <circle cx="512" cy="540" r="46" fill="#0f172a" stroke="#38bdf8" stroke-width="10"/>
-  <circle cx="512" cy="540" r="18" fill="#38bdf8"/>
-
-  <!-- Mini waveform under gauge for monitor feel -->
   <path
-    d="M 300 820 L 360 790 L 410 845 L 470 760 L 530 810 L 590 740 L 650 800 L 724 770"
+    d="M 200 360
+       L 320 360
+       L 360 280
+       L 420 440
+       L 470 220
+       L 530 400
+       L 580 320
+       L 640 360
+       L 824 360"
     fill="none"
-    stroke="#38bdf8"
-    stroke-width="16"
+    stroke="url(#pulse)"
+    stroke-width="36"
     stroke-linecap="round"
     stroke-linejoin="round"
-    opacity="0.9"
   />
+
+  <rect x="220" y="780" width="584" height="18" rx="9" fill="#334155" opacity="0.9"/>
 </svg>
