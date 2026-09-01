@@ -34,7 +34,7 @@
 ### 构建
 
 - 支持 `npm run build:exe` 本地打包
-- GitHub Actions Release 工作流产出 Windows NSIS / MSI / 便携 exe
+- GitHub Actions Release 工作流产出 Windows NSIS 安装包 / 便携 exe
 
 [Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.0...HEAD
 

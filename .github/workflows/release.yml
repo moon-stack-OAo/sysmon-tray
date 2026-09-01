@@ -70,7 +70,7 @@ jobs:
           $builder = New-Object System.Text.StringBuilder
           [void]$builder.AppendLine("## 下载")
           [void]$builder.AppendLine("")
-          [void]$builder.AppendLine("- Windows 安装包（NSIS / MSI）见下方 Assets")
+          [void]$builder.AppendLine("- Windows 安装包（NSIS）见下方 Assets")
           [void]$builder.AppendLine("- 也可直接使用便携版 ``sysmon-tray.exe``")
           [void]$builder.AppendLine("")
 
@@ -119,5 +119,4 @@ jobs:
           path: |
             src-tauri/target/release/sysmon-tray.exe
             src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: warn

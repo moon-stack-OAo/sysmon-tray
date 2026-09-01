@@ -110,7 +110,7 @@ src-tauri/target/release/sysmon-tray.exe
 
 ```text
 src-tauri/target/release/bundle/nsis/   # NSIS 安装包 .exe
-src-tauri/target/release/bundle/msi/    # MSI 安装包
+src-tauri/target/release/bundle/nsis/   # NSIS 安装包
 ```
 
 ### 发布（GitHub Actions）
