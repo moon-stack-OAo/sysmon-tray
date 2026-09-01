@@ -70,8 +70,8 @@ jobs:
           $builder = New-Object System.Text.StringBuilder
           [void]$builder.AppendLine("## 下载")
           [void]$builder.AppendLine("")
-          [void]$builder.AppendLine("- Windows 安装包（NSIS）见下方 Assets")
-          [void]$builder.AppendLine("- 也可直接使用便携版 ``sysmon-tray.exe``")
+          [void]$builder.AppendLine("- Windows 安装包（NSIS）：``sysmon-tray_*_x64-setup.exe``")
+          [void]$builder.AppendLine("- 便携版：``sysmon-tray.exe``")
           [void]$builder.AppendLine("")
 
           if ($match.Success) {
@@ -109,8 +109,11 @@ jobs:
           tagName: v__VERSION__
           releaseName: 系统监测 v__VERSION__
           releaseBody: ${{ steps.notes.outputs.body }}
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
+          # 上传资源用英文名，避免中文 productName 在 GitHub Assets 被截断
+          releaseAssetNamePattern: "[mainBinaryName]_[version]_[arch][setup].[ext]"
+          uploadPlainBinary: true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
