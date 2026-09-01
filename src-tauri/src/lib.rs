@@ -34,13 +34,13 @@ const OVERLAY_SNAP_THRESHOLD_PX: i32 = 36;
 const OVERLAY_SNAP_CORNER_BONUS_PX: i32 = 12;
 const OVERLAY_SNAP_DEBOUNCE_MS: u64 = 220;
 const OVERLAY_LAYOUT_QUIET_MS: u64 = 500;
-const OVERLAY_COLLAPSED_WIDTH: u32 = 300;
+const OVERLAY_COLLAPSED_WIDTH: u32 = 310;
 const OVERLAY_COLLAPSED_HEIGHT: u32 = 38;
 const OVERLAY_VERTICAL_WIDTH: u32 = 72;
 const OVERLAY_VERTICAL_HEIGHT: u32 = 168;
-const OVERLAY_NUMERIC_WIDTH: u32 = 248;
+const OVERLAY_NUMERIC_WIDTH: u32 = 258;
 const OVERLAY_NUMERIC_HEIGHT: u32 = 34;
-const OVERLAY_EXPANDED_WIDTH: u32 = 300;
+const OVERLAY_EXPANDED_WIDTH: u32 = 310;
 const OVERLAY_EXPANDED_HEIGHT: u32 = 176;
 const OVERLAY_PEEK_THICKNESS: u32 = 8;
 const OVERLAY_PEEK_LENGTH: u32 = 96;
@@ -835,13 +835,65 @@ fn apply_overlay_enabled(app: &AppHandle, enabled: bool) -> Result<bool, String>
     Ok(enabled)
 }
 
+fn persist_main_position(app: &AppHandle, x: i32, y: i32) {
+    if let Ok(mut cfg) = app.state::<SharedConfig>().lock() {
+        cfg.main_x = Some(x);
+        cfg.main_y = Some(y);
+        let _ = cfg.save();
+    }
+}
+
+fn restore_main_position(window: &tauri::WebviewWindow, cfg: &AppConfig) -> bool {
+    if let (Some(x), Some(y)) = (cfg.main_x, cfg.main_y) {
+        let _ = window.set_position(PhysicalPosition::new(x, y));
+        return true;
+    }
+    false
+}
+
+fn schedule_main_position_save(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let Ok(pos) = window.outer_position() else {
+        return;
+    };
+
+    if let Ok(mut cfg) = app.state::<SharedConfig>().lock() {
+        cfg.main_x = Some(pos.x);
+        cfg.main_y = Some(pos.y);
+    }
+
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(250));
+        let Some(window) = app_handle.get_webview_window("main") else {
+            return;
+        };
+        let Ok(pos) = window.outer_position() else {
+            return;
+        };
+        persist_main_position(&app_handle, pos.x, pos.y);
+    });
+}
+
 fn show_panel(app: &tauri::AppHandle, tray_rect: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>) {
     if let Some(window) = app.get_webview_window("main") {
-        if let Some((pos, size)) = tray_rect {
-            let win_size = window.outer_size().unwrap_or(PhysicalSize::new(340, 560));
-            let x = pos.x + (size.width as i32 / 2) - (win_size.width as i32 / 2);
-            let y = pos.y.saturating_sub(win_size.height as i32 + 8);
-            let _ = window.set_position(PhysicalPosition::new(x.max(0), y.max(0)));
+        let restored = app
+            .state::<SharedConfig>()
+            .lock()
+            .map(|cfg| restore_main_position(&window, &cfg))
+            .unwrap_or(false);
+
+        if !restored {
+            if let Some((pos, size)) = tray_rect {
+                let win_size = window.outer_size().unwrap_or(PhysicalSize::new(380, 690));
+                let x = pos.x + (size.width as i32 / 2) - (win_size.width as i32 / 2);
+                let y = pos.y.saturating_sub(win_size.height as i32 + 8);
+                let physical = PhysicalPosition::new(x.max(0), y.max(0));
+                let _ = window.set_position(physical);
+                persist_main_position(app, physical.x, physical.y);
+            }
         }
 
         let _ = window.show();
@@ -852,6 +904,9 @@ fn show_panel(app: &tauri::AppHandle, tray_rect: Option<(PhysicalPosition<i32>, 
 
 fn hide_panel(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        if let Ok(pos) = window.outer_position() {
+            persist_main_position(app, pos.x, pos.y);
+        }
         let _ = window.hide();
     }
 }
@@ -939,7 +994,7 @@ pub fn run() {
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let show = MenuItem::with_id(app, "show", "显示面板", true, None::<&str>)?;
             let alert_settings =
-                MenuItem::with_id(app, "alert_settings", "告警设置", true, None::<&str>)?;
+                MenuItem::with_id(app, "alert_settings", "设置", true, None::<&str>)?;
             let overlay_item = CheckMenuItem::with_id(
                 app,
                 "overlay",
@@ -1010,11 +1065,20 @@ pub fn run() {
                             .map(|flag| !*flag)
                             .unwrap_or(true);
                         if should_hide {
+                            if let Ok(pos) = panel.outer_position() {
+                                persist_main_position(&app_handle, pos.x, pos.y);
+                            }
                             let _ = panel.hide();
                         }
                     }
+                    WindowEvent::Moved(_) => {
+                        schedule_main_position_save(&app_handle);
+                    }
                     WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
+                        if let Ok(pos) = panel.outer_position() {
+                            persist_main_position(&app_handle, pos.x, pos.y);
+                        }
                         let _ = panel.hide();
                     }
                     _ => {}
@@ -1054,15 +1118,22 @@ pub fn run() {
                 // 仅在用户主动退出时结束进程；关闭窗口只隐藏
                 if code.is_none() {
                     api.prevent_exit();
-                } else if let Some(window) = app_handle.get_webview_window("overlay") {
-                    // 退出前尽量落盘叠加层位置（保留已记录的贴边方向）
-                    if let Ok(pos) = window.outer_position() {
-                        let (edge_x, edge_y) = app_handle
-                            .state::<SharedConfig>()
-                            .lock()
-                            .map(|cfg| (cfg.overlay_edge_x, cfg.overlay_edge_y))
-                            .unwrap_or((None, None));
-                        persist_overlay_position(app_handle, pos.x, pos.y, edge_x, edge_y);
+                } else {
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        if let Ok(pos) = window.outer_position() {
+                            persist_main_position(app_handle, pos.x, pos.y);
+                        }
+                    }
+                    if let Some(window) = app_handle.get_webview_window("overlay") {
+                        // 退出前尽量落盘叠加层位置（保留已记录的贴边方向）
+                        if let Ok(pos) = window.outer_position() {
+                            let (edge_x, edge_y) = app_handle
+                                .state::<SharedConfig>()
+                                .lock()
+                                .map(|cfg| (cfg.overlay_edge_x, cfg.overlay_edge_y))
+                                .unwrap_or((None, None));
+                            persist_overlay_position(app_handle, pos.x, pos.y, edge_x, edge_y);
+                        }
                     }
                 }
             }

@@ -19,13 +19,19 @@
 - 叠加层四边吸附（基于工作区，避开任务栏）；角落优先、阈值提高，并持久化贴边方向
 - 叠加层「贴边自动隐藏」：贴边后收成细边条热区，鼠标靠近展开
 - 叠加层形态可选：胶囊细条 / 竖条 / 纯数值条（设置页下拉）
+- 主面板标题栏可拖动，位置写入配置（`main_x` / `main_y`）；首次打开靠近托盘
 - LibreHardwareMonitor（LHM）精确温度可选接入
 - 设置页：告警、通知与显示、精确温度分组
 - 设置页支持「开机自启」开关（基于 tauri-plugin-autostart）
+- 常用脚本：`tauri:dev`、`typecheck`、`format` / `format:check`、`clean`
 
 ### 优化
 
-- 主面板紧凑仪表盘布局（340×560）
+- 主面板仪表盘布局（380×690）；设置页底部操作栏固定，不再遮挡内容
+- 主面板与设置页视觉微调（间距、圆角、阴影）；去掉透明窗口外圈重阴影
+- 叠加层默认宽度调整为 310（纯数值条 258）
+- 托盘右键菜单文案：「告警设置」改为「设置」
+- 产品名（`productName`）改为 `sysmon`，安装目录与快捷方式使用英文标识
 - CPU / 内存双列核心指标，网络与磁盘更紧凑
 - 深色玻璃拟态视觉与设计令牌统一
 - 禁用 WebView 右键菜单
@@ -34,7 +40,9 @@
 ### 构建
 
 - 支持 `npm run build:exe` 本地打包
-- GitHub Actions Release 工作流产出 Windows NSIS 安装包 / 便携 exe
+- GitHub Actions Release：正式发布（非草稿），产出 NSIS 安装包 / 便携 exe
+- NSIS 安装界面支持中英双语选择
+- Release 资源统一英文文件名（`sysmon-tray_*_x64-setup.exe`）
 
 [Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/moon-stack-OAo/sysmon-tray/releases/tag/v0.1.0

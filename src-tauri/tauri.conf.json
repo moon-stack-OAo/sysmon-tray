@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "系统监测",
+  "productName": "sysmon",
   "version": "0.1.0",
   "identifier": "com.sysmon.tray",
   "build": {
@@ -15,8 +15,8 @@
       {
         "label": "main",
         "title": "系统监测",
-        "width": 340,
-        "height": 560,
+        "width": 380,
+        "height": 690,
         "resizable": false,
         "decorations": false,
         "transparent": true,
@@ -31,7 +31,7 @@
         "label": "overlay",
         "title": "系统监测叠加层",
         "url": "overlay.html",
-        "width": 300,
+        "width": 310,
         "height": 38,
         "resizable": false,
         "decorations": false,

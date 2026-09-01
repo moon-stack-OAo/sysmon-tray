@@ -111,7 +111,6 @@ jobs:
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
-          # 上传资源用英文名，避免中文 productName 在 GitHub Assets 被截断
           releaseAssetNamePattern: "[mainBinaryName]_[version]_[arch][setup].[ext]"
           uploadPlainBinary: true
 

@@ -109,6 +109,12 @@ pub struct AppConfig {
     /// 叠加层收起态形态：capsule / vertical / numeric
     #[serde(default = "default_overlay_style")]
     pub overlay_style: OverlayStyle,
+    /// 主面板窗口物理坐标 X（None 表示首次按托盘定位）
+    #[serde(default)]
+    pub main_x: Option<i32>,
+    /// 主面板窗口物理坐标 Y
+    #[serde(default)]
+    pub main_y: Option<i32>,
     /// 叠加层窗口物理坐标 X（None 表示使用系统默认位置）
     #[serde(default)]
     pub overlay_x: Option<i32>,
@@ -135,6 +141,8 @@ impl Default for AppConfig {
             autostart_enabled: default_autostart_enabled(),
             overlay_auto_hide: default_overlay_auto_hide(),
             overlay_style: default_overlay_style(),
+            main_x: None,
+            main_y: None,
             overlay_x: None,
             overlay_y: None,
             overlay_edge_x: None,
