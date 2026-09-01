@@ -65,8 +65,29 @@ struct TempSourceStatus {
     lhm_base_url: String,
 }
 
+fn ensure_notification_permission(app: &tauri::AppHandle) -> bool {
+    use tauri::plugin::PermissionState;
+    match app.notification().permission_state() {
+        Ok(PermissionState::Granted) => true,
+        Ok(PermissionState::Denied) => false,
+        Ok(_) => app
+            .notification()
+            .request_permission()
+            .map(|state| matches!(state, PermissionState::Granted))
+            .unwrap_or(false),
+        Err(err) => {
+            eprintln!("读取通知权限失败: {err}");
+            false
+        }
+    }
+}
+
 fn send_alert_notification(app: &tauri::AppHandle, newly_fired: &[String]) {
     if newly_fired.is_empty() {
+        return;
+    }
+    if !ensure_notification_permission(app) {
+        eprintln!("系统通知权限未授予，跳过告警通知");
         return;
     }
     let body = newly_fired.join(" · ");
@@ -199,12 +220,30 @@ fn get_app_config(config: tauri::State<'_, SharedConfig>) -> Result<AppConfig, S
 #[tauri::command]
 fn set_notification_enabled(
     enabled: bool,
+    app: AppHandle,
     config: tauri::State<'_, SharedConfig>,
 ) -> Result<bool, String> {
-    let mut cfg = config.lock().map_err(|e| e.to_string())?;
-    cfg.notification_enabled = enabled;
-    cfg.save()?;
-    Ok(cfg.notification_enabled)
+    {
+        let mut cfg = config.lock().map_err(|e| e.to_string())?;
+        cfg.notification_enabled = enabled;
+        cfg.save()?;
+    }
+    if enabled {
+        if !ensure_notification_permission(&app) {
+            return Err("系统通知权限未授予，请在 Windows 通知设置中允许本应用".to_string());
+        }
+        // 开启时发一条测试通知，便于确认权限与系统开关正常
+        if let Err(err) = app
+            .notification()
+            .builder()
+            .title("系统监测")
+            .body("已启用系统通知")
+            .show()
+        {
+            eprintln!("发送测试通知失败: {err}");
+        }
+    }
+    Ok(enabled)
 }
 
 #[tauri::command]
@@ -360,8 +399,8 @@ fn parse_overlay_layout_mode(mode: &str) -> Result<OverlayLayoutMode, String> {
 fn overlay_layout_size(
     mode: OverlayLayoutMode,
     style: OverlayStyle,
-    edge_x: Option<OverlayEdgeX>,
-    edge_y: Option<OverlayEdgeY>,
+    _edge_x: Option<OverlayEdgeX>,
+    _edge_y: Option<OverlayEdgeY>,
 ) -> (u32, u32) {
     match mode {
         OverlayLayoutMode::Collapsed => match style {
@@ -371,14 +410,8 @@ fn overlay_layout_size(
         },
         OverlayLayoutMode::Expanded => (OVERLAY_EXPANDED_WIDTH, OVERLAY_EXPANDED_HEIGHT),
         OverlayLayoutMode::Peek => {
-            // 优先按水平贴边出竖条；仅上下贴边时出横条
-            if edge_x.is_some() {
-                (OVERLAY_PEEK_THICKNESS, OVERLAY_PEEK_LENGTH)
-            } else if edge_y.is_some() {
-                (OVERLAY_PEEK_LENGTH, OVERLAY_PEEK_THICKNESS)
-            } else {
-                (OVERLAY_PEEK_LENGTH, OVERLAY_PEEK_THICKNESS)
-            }
+            // 自动隐藏热区仅服务左右贴边，固定为竖细条
+            (OVERLAY_PEEK_THICKNESS, OVERLAY_PEEK_LENGTH)
         }
     }
 }
@@ -723,8 +756,11 @@ fn apply_overlay_snap_and_persist(app: &AppHandle) {
         .lock()
         .map(|cfg| cfg.overlay_auto_hide)
         .unwrap_or(false);
-    if auto_hide && (snap.edge_x.is_some() || snap.edge_y.is_some()) {
-        let _ = app.emit("overlay-snap-edge", true);
+    // 贴边自动隐藏仅以左右边为准
+    if auto_hide {
+        if let Some(edge) = snap.edge_x {
+            let _ = app.emit("overlay-snap-edge", edge.as_str());
+        }
     }
 }
 

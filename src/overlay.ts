@@ -34,10 +34,15 @@ let mode: OverlayMode = 'collapsed';
 let style: OverlayStyle = 'capsule';
 let resizing = false;
 let autoHide = false;
+let edgeX: 'left' | 'right' | null = null;
 let hideTimer: number | undefined;
 let pinnedExpanded = false;
 
 const HIDE_DELAY_MS = 900;
+
+function canPeekHide(): boolean {
+  return autoHide && !!edgeX;
+}
 
 function normalizeStyle(value: string | null | undefined): OverlayStyle {
   if (value === 'vertical' || value === 'numeric' || value === 'capsule') return value;
@@ -135,7 +140,7 @@ async function setCollapsed(nextCollapsed: boolean) {
   pinnedExpanded = !nextCollapsed;
   clearHideTimer();
   if (nextCollapsed) {
-    if (autoHide) {
+    if (canPeekHide()) {
       await setMode('peek');
     } else {
       await setMode('collapsed');
@@ -146,7 +151,7 @@ async function setCollapsed(nextCollapsed: boolean) {
 }
 
 function scheduleAutoHide() {
-  if (!autoHide || pinnedExpanded || mode === 'peek') return;
+  if (!canPeekHide() || pinnedExpanded || mode === 'peek') return;
   clearHideTimer();
   hideTimer = window.setTimeout(() => {
     void setMode('peek');
@@ -181,10 +186,11 @@ async function loadOverlayConfig() {
   try {
     const cfg = await invoke<AppConfig>('get_app_config');
     autoHide = !!cfg.overlayAutoHide;
+    edgeX = cfg.overlayEdgeX === 'left' || cfg.overlayEdgeX === 'right' ? cfg.overlayEdgeX : null;
     await applyOverlayStyle(normalizeStyle(cfg.overlayStyle));
-    if (autoHide && mode === 'collapsed') {
+    if (canPeekHide() && mode === 'collapsed') {
       await setMode('peek');
-    } else if (!autoHide && mode === 'peek') {
+    } else if (mode === 'peek' && !canPeekHide()) {
       await setMode('collapsed');
     }
   } catch (error) {
@@ -342,7 +348,7 @@ function bindCollapseUi() {
   });
 
   root?.addEventListener('mouseleave', () => {
-    if (!autoHide || pinnedExpanded) return;
+    if (!canPeekHide() || pinnedExpanded) return;
     if (mode === 'collapsed' || mode === 'expanded') {
       scheduleAutoHide();
     }
@@ -373,7 +379,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
   void listen<boolean>('overlay-auto-hide-changed', (event) => {
     autoHide = !!event.payload;
-    if (autoHide) {
+    if (canPeekHide()) {
       if (!pinnedExpanded && mode !== 'peek') {
         scheduleAutoHide();
       }
@@ -386,8 +392,9 @@ window.addEventListener('DOMContentLoaded', () => {
     void applyOverlayStyle(normalizeStyle(event.payload));
   });
 
-  void listen('overlay-snap-edge', () => {
-    if (!autoHide || pinnedExpanded) return;
+  void listen<'left' | 'right'>('overlay-snap-edge', (event) => {
+    edgeX = event.payload === 'left' || event.payload === 'right' ? event.payload : edgeX;
+    if (!canPeekHide() || pinnedExpanded) return;
     scheduleAutoHide();
   });
 });

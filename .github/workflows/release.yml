@@ -111,7 +111,7 @@ jobs:
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
-          releaseAssetNamePattern: "[mainBinaryName]_[version]_[arch][setup].[ext]"
+          releaseAssetNamePattern: '[mainBinaryName]_[version]_[arch][setup].[ext]'
           uploadPlainBinary: true
 
       - name: Upload build artifacts

@@ -2,47 +2,40 @@
 
 本文件记录系统监测（sysmon-tray）的重要变更。
 
-格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)
-版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)
+格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [Unreleased]
 
-## [0.1.0]
+## [0.1.0] - 2026-09-01
+
+首个公开发布版本。
 
 ### 新增
 
-- 基于 Tauri 2 的 Windows 托盘常驻系统监测
-- 迷你面板：CPU / 内存 / 网络 / 磁盘 / CPU 温度实时展示
-- 告警阈值、冷却时间、系统通知
-- 历史曲线（可配置 1 / 5 / 15 / 60 分钟）
-- 桌面叠加层：收起细条 / 展开进度条双态
-- 叠加层四边吸附（基于工作区，避开任务栏）；角落优先、阈值提高，并持久化贴边方向
-- 叠加层「贴边自动隐藏」：贴边后收成细边条热区，鼠标靠近展开
-- 叠加层形态可选：胶囊细条 / 竖条 / 纯数值条（设置页下拉）
-- 主面板标题栏可拖动，位置写入配置（`main_x` / `main_y`）；首次打开靠近托盘
-- LibreHardwareMonitor（LHM）精确温度可选接入
-- 设置页：告警、通知与显示、精确温度分组
-- 设置页支持「开机自启」开关（基于 tauri-plugin-autostart）
+- Windows 托盘常驻系统监测（Tauri 2）
+- 主面板实时展示 CPU / 内存 / 网络 / 磁盘 / CPU 温度
+- 告警阈值、冷却时间与系统通知（启动请求权限；开启时可发测试通知）
+- 历史曲线：1 / 5 / 15 / 60 分钟
+- 桌面叠加层：胶囊细条 / 竖条 / 纯数值条；展开详情
+- 叠加层四边吸附（工作区，避开任务栏），角落优先并持久化贴边方向
+- 叠加层贴边自动隐藏：仅左右贴边收成竖热区，鼠标靠近展开
+- 主面板标题栏可拖动并记住位置（`main_x` / `main_y`）
+- 可选 LibreHardwareMonitor（LHM）精确温度
+- 设置页：告警、通知与显示、精确温度、开机自启
 - 常用脚本：`tauri:dev`、`typecheck`、`format` / `format:check`、`clean`
 
-### 优化
+### 说明
 
-- 主面板仪表盘布局（380×690）；设置页底部操作栏固定，不再遮挡内容
-- 主面板与设置页视觉微调（间距、圆角、阴影）；去掉透明窗口外圈重阴影
-- 叠加层默认宽度调整为 310（纯数值条 258）
-- 托盘右键菜单文案：「告警设置」改为「设置」
-- 产品名（`productName`）改为 `sysmon`，安装目录与快捷方式使用英文标识
-- CPU / 内存双列核心指标，网络与磁盘更紧凑
-- 深色玻璃拟态视觉与设计令牌统一
-- 禁用 WebView 右键菜单
-- 叠加层透明观感；展开/收起按贴边锚定（右/下）定位，减少漂移
+- 产品标识：`productName = sysmon`，安装目录与快捷方式使用英文名
+- 主面板尺寸：`380×690`；叠加层默认宽度：`310`（纯数值条 `258`）
+- 托盘菜单：显示面板 / 叠加层 / 设置 / 退出
 
 ### 构建
 
-- 支持 `npm run build:exe` 本地打包
-- GitHub Actions Release：正式发布（非草稿），产出 NSIS 安装包 / 便携 exe
+- `npm run build:exe` 本地打包
+- GitHub Actions Release 正式发布：NSIS 安装包 + 便携 `sysmon-tray.exe`
 - NSIS 安装界面支持中英双语选择
-- Release 资源统一英文文件名（`sysmon-tray_*_x64-setup.exe`）
+- Release 资源英文命名：`sysmon-tray_*_x64-setup.exe`
 
 [Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/moon-stack-OAo/sysmon-tray/releases/tag/v0.1.0

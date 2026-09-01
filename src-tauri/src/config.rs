@@ -74,6 +74,15 @@ pub enum OverlayEdgeX {
     Right,
 }
 
+impl OverlayEdgeX {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OverlayEdgeX::Left => "left",
+            OverlayEdgeX::Right => "right",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum OverlayEdgeY {

@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
 
 interface DiskStat {
   name: string;
@@ -829,9 +830,24 @@ window.addEventListener('contextmenu', (event) => {
   event.preventDefault();
 });
 
+async function ensureFrontendNotificationPermission() {
+  try {
+    let granted = await isPermissionGranted();
+    if (!granted) {
+      granted = (await requestPermission()) === 'granted';
+    }
+    if (!granted) {
+      console.warn('系统通知权限未授予');
+    }
+  } catch (error) {
+    console.error('请求系统通知权限失败', error);
+  }
+}
+
 window.addEventListener('DOMContentLoaded', () => {
   bindSettingsUi();
   void bootstrapHistoryHint();
+  void ensureFrontendNotificationPermission();
   refreshMetrics();
   window.setInterval(refreshMetrics, 1000);
 
