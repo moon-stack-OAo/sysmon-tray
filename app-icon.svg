@@ -1,65 +1,78 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="SysMon">
   <defs>
-    <linearGradient id="bg" x1="18%" y1="8%" x2="86%" y2="96%">
-      <stop offset="0%" stop-color="#1e293b"/>
-      <stop offset="50%" stop-color="#0f172a"/>
-      <stop offset="100%" stop-color="#020617"/>
+    <linearGradient id="waveGlow" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#55b3ff" stop-opacity="0.35"/>
+      <stop offset="50%" stop-color="#55b3ff" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#55b3ff" stop-opacity="0.35"/>
     </linearGradient>
-    <linearGradient id="frame" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#7dd3fc"/>
-      <stop offset="100%" stop-color="#0ea5e9"/>
-    </linearGradient>
-    <linearGradient id="bar1" x1="0%" y1="100%" x2="0%" y2="0%">
-      <stop offset="0%" stop-color="#0284c7"/>
-      <stop offset="100%" stop-color="#38bdf8"/>
-    </linearGradient>
-    <linearGradient id="bar2" x1="0%" y1="100%" x2="0%" y2="0%">
-      <stop offset="0%" stop-color="#7c3aed"/>
-      <stop offset="100%" stop-color="#a78bfa"/>
-    </linearGradient>
-    <linearGradient id="bar3" x1="0%" y1="100%" x2="0%" y2="0%">
-      <stop offset="0%" stop-color="#c2410c"/>
-      <stop offset="100%" stop-color="#fb923c"/>
-    </linearGradient>
-    <linearGradient id="pulse" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0"/>
-      <stop offset="35%" stop-color="#38bdf8"/>
-      <stop offset="50%" stop-color="#f8fafc"/>
-      <stop offset="65%" stop-color="#a78bfa"/>
-      <stop offset="100%" stop-color="#a78bfa" stop-opacity="0"/>
-    </linearGradient>
-    <radialGradient id="glow" cx="50%" cy="45%" r="45%">
-      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.24"/>
-      <stop offset="100%" stop-color="#0ea5e9" stop-opacity="0"/>
-    </radialGradient>
+    <filter id="softGlow" x="-20%" y="-40%" width="140%" height="180%">
+      <feGaussianBlur stdDeviation="10" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
   </defs>
 
-  <rect x="64" y="64" width="896" height="896" rx="208" fill="url(#bg)"/>
-  <rect x="64" y="64" width="896" height="896" rx="208" fill="url(#glow)"/>
-  <rect x="92" y="92" width="840" height="840" rx="184" fill="none" stroke="url(#frame)" stroke-width="24" opacity="0.9"/>
+  <!-- Windows app tile: ~22% corner radius -->
+  <rect width="1024" height="1024" rx="225" ry="225" fill="#101111"/>
+  <rect x="3" y="3" width="1018" height="1018" rx="222" ry="222" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="3"/>
 
-  <g>
-    <rect x="250" y="430" width="120" height="340" rx="36" fill="url(#bar1)"/>
-    <rect x="452" y="280" width="120" height="490" rx="36" fill="url(#bar2)"/>
-    <rect x="654" y="360" width="120" height="410" rx="36" fill="url(#bar3)"/>
+  <!-- Instrument bezel -->
+  <circle cx="512" cy="512" r="312" fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="10"/>
+  <circle cx="512" cy="512" r="292" fill="none" stroke="rgba(255,255,255,0.04)" stroke-width="2"/>
+
+  <!-- Precision tick marks (upper arc) -->
+  <g stroke="#9c9c9d" stroke-linecap="round" fill="none">
+    <!-- major ticks -->
+    <path d="M512 208 L512 248" stroke-width="10"/>
+    <path d="M308 308 L336 336" stroke-width="10"/>
+    <path d="M716 308 L688 336" stroke-width="10"/>
+    <path d="M220 512 L260 512" stroke-width="10"/>
+    <path d="M804 512 L764 512" stroke-width="10"/>
+    <!-- minor ticks -->
+    <g stroke="#6a6b6c" stroke-width="5" opacity="0.9">
+      <path d="M392 230 L404 258"/>
+      <path d="M632 230 L620 258"/>
+      <path d="M246 392 L274 404"/>
+      <path d="M778 392 L750 404"/>
+      <path d="M246 632 L274 620"/>
+      <path d="M778 632 L750 620"/>
+    </g>
   </g>
 
+  <!-- Quiet baseline / horizon -->
+  <line x1="280" y1="512" x2="744" y2="512" stroke="rgba(255,255,255,0.06)" stroke-width="3" stroke-dasharray="6 14"/>
+
+  <!-- Live monitoring waveform — primary silhouette -->
   <path
-    d="M 200 360
-       L 320 360
-       L 360 280
-       L 420 440
-       L 470 220
-       L 530 400
-       L 580 320
-       L 640 360
-       L 824 360"
+    d="M268 560
+       C 318 560, 338 420, 388 420
+       C 438 420, 448 640, 512 640
+       C 576 640, 586 360, 636 360
+       C 686 360, 706 520, 756 520"
     fill="none"
-    stroke="url(#pulse)"
+    stroke="url(#waveGlow)"
     stroke-width="36"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    filter="url(#softGlow)"
+  />
+  <!-- Crisp stroke on top for small-size readability -->
+  <path
+    d="M268 560
+       C 318 560, 338 420, 388 420
+       C 438 420, 448 640, 512 640
+       C 576 640, 586 360, 636 360
+       C 686 360, 706 520, 756 520"
+    fill="none"
+    stroke="#55b3ff"
+    stroke-width="28"
     stroke-linecap="round"
     stroke-linejoin="round"
   />
 
-  <rect x="220" y="780" width="584" height="18" rx="9" fill="#334155" opacity="0.9"/>
+  <!-- Accent pulse node (status) -->
+  <circle cx="636" cy="360" r="18" fill="#55b3ff"/>
+  <circle cx="636" cy="360" r="32" fill="none" stroke="#55b3ff" stroke-opacity="0.35" stroke-width="6"/>
 </svg>

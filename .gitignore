@@ -42,6 +42,8 @@ coverage
 # Tauri / Rust
 src-tauri/target
 src-tauri/gen/schemas
+src-tauri/icons/android/
+src-tauri/icons/ios/
 
 # Prettier / cache
 .prettiercache

@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+## [0.1.1]
+
+### 变更
+
+- 主面板与叠加层视觉升级为 Obsidian Instrument（近黑精密仪表盘、冷青蓝强调色）
+- 设置页底部「保存 / 恢复默认」固定，内容区独立滚动
+- 应用图标改为精密仪表环 + 冷青蓝波形，并重新生成 Tauri 图标集
+
 ## [0.1.0]
 
 首个公开发布版本。
@@ -37,5 +45,6 @@
 - NSIS 安装界面支持中英双语选择
 - Release 资源英文命名：`sysmon-tray_*_x64-setup.exe`
 
-[Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/moon-stack-OAo/sysmon-tray/releases/tag/v0.1.0

@@ -236,7 +236,7 @@ function drawHistoryChart(points: HistoryPoint[]) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cssWidth, cssHeight);
 
-  ctx.strokeStyle = 'rgba(148, 163, 184, 0.12)';
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
   ctx.lineWidth = 1;
   for (let i = 1; i <= 3; i++) {
     const y = (cssHeight / 4) * i;
@@ -248,8 +248,8 @@ function drawHistoryChart(points: HistoryPoint[]) {
 
   const drawPoints = downsampleForDraw(points);
   if (drawPoints.length < 2) {
-    ctx.fillStyle = '#9aa6b2';
-    ctx.font = '12px Segoe UI, Microsoft YaHei, sans-serif';
+    ctx.fillStyle = '#9c9c9d';
+    ctx.font = '12px Inter, Segoe UI, Microsoft YaHei, sans-serif';
     ctx.fillText('采集中…', 10, cssHeight / 2 + 4);
     if (tempLegend) tempLegend.hidden = true;
     updateChartReadings(null, false);
@@ -340,18 +340,18 @@ function drawHistoryChart(points: HistoryPoint[]) {
 
   drawSeries(
     drawPoints.map((p) => p.cpuPercent),
-    '#38bdf8',
+    '#55b3ff',
     yPercent,
   );
   drawSeries(
     drawPoints.map((p) => p.memoryPercent),
-    '#a78bfa',
+    '#5fc992',
     yPercent,
   );
   if (hasTemp) {
     drawSeries(
       drawPoints.map((p) => p.cpuTempCelsius),
-      '#fb923c',
+      '#ff9a4a',
       yTemp,
     );
   }
