@@ -24,5 +24,8 @@ tauri-plugin-notification = "2"
 ureq = { version = "3.4", default-features = false, features = ["gzip", "json"] }
 tauri-plugin-autostart = "2.5.1"
 
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2"
+
 [target.'cfg(windows)'.dependencies]
 wmi = { version = "0.17", default-features = false }

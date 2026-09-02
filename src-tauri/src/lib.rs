@@ -979,6 +979,10 @@ pub fn run() {
     let temp_tracker = TempSourceTracker::new();
 
     tauri::Builder::default()
+        // 须最先注册：二次启动时唤醒已有实例并显示主面板
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_panel(app, None);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
