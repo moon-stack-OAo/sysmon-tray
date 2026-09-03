@@ -1,13 +1,15 @@
 use crate::history::MetricsHistory;
 use crate::temperature::{ChainedTemperatureProvider, TemperatureProvider};
-use crate::temperature_lhm::{LhmRuntimeConfig, TempSourceTracker};
 use serde::Serialize;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use sysinfo::{Disks, Networks, System};
 
 /// 多窗口同时拉取时，短于此间隔则返回缓存，避免网速差分被打乱
 pub const METRICS_CACHE_MIN_INTERVAL: Duration = Duration::from_millis(700);
+
+/// 距上次真实采样超过该间隔（长时间无请求、休眠恢复）时差分失真，本帧网速置 0
+pub const NET_DIFF_MAX_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,7 +41,6 @@ pub struct MonitorState {
     system: System,
     disks: Disks,
     networks: Networks,
-    temperature: ChainedTemperatureProvider,
     history: MetricsHistory,
     last_sample_at: Instant,
     last_net_down: u64,
@@ -49,11 +50,7 @@ pub struct MonitorState {
 }
 
 impl MonitorState {
-    pub fn with_history_capacity(
-        capacity: usize,
-        lhm_runtime: Arc<LhmRuntimeConfig>,
-        temp_tracker: Arc<TempSourceTracker>,
-    ) -> Self {
+    pub fn with_history_capacity(capacity: usize) -> Self {
         let mut system = System::new_all();
         system.refresh_all();
 
@@ -70,7 +67,6 @@ impl MonitorState {
             system,
             disks,
             networks,
-            temperature: ChainedTemperatureProvider::platform_default(lhm_runtime, temp_tracker),
             history: MetricsHistory::new(capacity),
             last_sample_at: Instant::now(),
             last_net_down: net_down,
@@ -83,24 +79,16 @@ impl MonitorState {
         self.history.set_capacity(capacity);
     }
 
-    /// 距上次真实采样不足 `min_interval` 时返回缓存，避免双窗口打乱网速差分。
-    pub fn sample_cached(&mut self, min_interval: Duration) -> Metrics {
-        if let Some(ref cached) = self.last_metrics {
-            if self.last_sample_at.elapsed() < min_interval {
-                return cached.clone();
-            }
-        }
-        self.sample()
-    }
-
-    pub fn sample(&mut self) -> Metrics {
+    /// 锁内仅完成 sysinfo 采样与网速差分；温度 IO 由 sample_cached_shared 在锁外回填。
+    /// 温度先沿用上次读数占位入缓存，避免温度 IO 期间并发请求触发第二路采样打乱网速差分。
+    fn sample_system_only(&mut self) -> Metrics {
         self.system.refresh_cpu_usage();
         self.system.refresh_memory();
         self.disks.refresh(true);
         self.networks.refresh(true);
 
         let now = Instant::now();
-        let elapsed = now.duration_since(self.last_sample_at).as_secs_f64().max(0.001);
+        let elapsed = now.duration_since(self.last_sample_at);
 
         let (net_down, net_up) = sum_network(&self.networks);
         let down_delta = net_down.saturating_sub(self.last_net_down);
@@ -140,6 +128,19 @@ impl MonitorState {
             })
             .collect();
 
+        // 间隔过长时差分不代表当前网速，置 0 比沿用陈旧旧值更不易误导，下轮即恢复正常差分
+        let (net_down_bps, net_up_bps) = if elapsed > NET_DIFF_MAX_INTERVAL {
+            (0, 0)
+        } else {
+            let secs = elapsed.as_secs_f64().max(0.001);
+            (
+                (down_delta as f64 / secs) as u64,
+                (up_delta as f64 / secs) as u64,
+            )
+        };
+
+        let last_temp = self.last_metrics.as_ref().and_then(|m| m.cpu_temp_celsius);
+
         let metrics = Metrics {
             cpu_percent: self.system.global_cpu_usage(),
             memory_used_bytes: memory_used,
@@ -147,19 +148,30 @@ impl MonitorState {
             memory_percent,
             swap_used_bytes: self.system.used_swap(),
             swap_total_bytes: self.system.total_swap(),
-            net_down_bps: (down_delta as f64 / elapsed) as u64,
-            net_up_bps: (up_delta as f64 / elapsed) as u64,
+            net_down_bps,
+            net_up_bps,
             disks,
-            cpu_temp_celsius: self.temperature.read_cpu_temp_celsius(),
+            cpu_temp_celsius: last_temp,
             sampled_at_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis())
                 .unwrap_or(0),
         };
 
-        self.history.push_from_metrics(&metrics);
         self.last_metrics = Some(metrics.clone());
         metrics
+    }
+
+    /// 温度读数到位后写入历史并回填缓存；缓存已被更新采样覆盖时跳过，避免历史乱序
+    fn complete_sample(&mut self, metrics: Metrics) {
+        let is_current = self
+            .last_metrics
+            .as_ref()
+            .is_some_and(|last| last.sampled_at_ms == metrics.sampled_at_ms);
+        if is_current {
+            self.history.push_from_metrics(&metrics);
+            self.last_metrics = Some(metrics);
+        }
     }
 
     pub fn history_snapshot(&self) -> Vec<crate::history::HistoryPoint> {
@@ -177,3 +189,36 @@ fn sum_network(networks: &Networks) -> (u64, u64) {
 }
 
 pub type SharedMonitor = Mutex<MonitorState>;
+pub type SharedTemperature = Mutex<ChainedTemperatureProvider>;
+
+/// 主面板与叠加层共用的采样入口：距上次真实采样不足 `min_interval` 返回缓存。
+/// 真实采样时锁内完成 sysinfo 采样与网速差分，释放锁后再读温度（LHM/WMI IO
+/// 最长可达数百毫秒），避免阻塞 get_metrics_history 等共享读者。
+pub fn sample_cached_shared(
+    monitor: &SharedMonitor,
+    temperature: &SharedTemperature,
+    min_interval: Duration,
+) -> Result<Metrics, String> {
+    let (mut metrics, needs_temp) = {
+        let mut state = monitor.lock().map_err(|e| e.to_string())?;
+        match state.last_metrics {
+            Some(ref cached) if state.last_sample_at.elapsed() < min_interval => {
+                (cached.clone(), false)
+            }
+            _ => (state.sample_system_only(), true),
+        }
+    };
+
+    if needs_temp {
+        let temp = {
+            let mut provider = temperature.lock().map_err(|e| e.to_string())?;
+            provider.read_cpu_temp_celsius()
+        };
+        metrics.cpu_temp_celsius = temp;
+
+        let mut state = monitor.lock().map_err(|e| e.to_string())?;
+        state.complete_sample(metrics.clone());
+    }
+
+    Ok(metrics)
+}

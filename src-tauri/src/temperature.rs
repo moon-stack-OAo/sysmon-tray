@@ -26,7 +26,7 @@ impl ChainedTemperatureProvider {
     /// 构建默认链。
     /// - 启用精确温度时：LHM → WMI → sysinfo
     /// - 关闭时：WMI → sysinfo（Windows 上 WMI 通常更有效）
-    /// LHM 内部读共享开关，设置页可热更新。
+    /// - LHM 内部读共享开关，设置页可热更新。
     pub fn platform_default(
         lhm_runtime: Arc<LhmRuntimeConfig>,
         tracker: Arc<TempSourceTracker>,
@@ -109,7 +109,14 @@ impl TemperatureProvider for SysinfoComponentsProvider {
 mod windows_wmi {
     use super::{is_plausible_celsius, pick_cpu_temp, TemperatureProvider};
     use serde::Deserialize;
+    use std::sync::mpsc;
+    use std::time::Duration;
     use wmi::{COMLibrary, WMIConnection};
+
+    type WmiQueryResult = Option<Vec<(String, f32)>>;
+    type QueryResponder = mpsc::Sender<WmiQueryResult>;
+
+    const QUERY_TIMEOUT: Duration = Duration::from_millis(300);
 
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "PascalCase")]
@@ -131,31 +138,59 @@ mod windows_wmi {
     /// 2. `Win32_PerfFormattedData_Counters_ThermalZoneInformation`（通常无需提权）
     ///
     /// 二者均为 ACPI 热区，不是逐核传感器；逐核需 LibreHardwareMonitor 等驱动方案。
-    pub struct WindowsWmiThermalProvider;
+    pub struct WindowsWmiThermalProvider {
+        req_tx: Option<mpsc::SyncSender<QueryResponder>>,
+    }
 
     impl WindowsWmiThermalProvider {
         pub fn new() -> Self {
-            Self
+            Self { req_tx: None }
         }
 
-        fn com() -> Option<COMLibrary> {
-            COMLibrary::new().ok()
+        /// 常驻 worker：仅首次采样时创建（延迟初始化，避免建窗前污染 Tauri 主线程 STA）。
+        /// COM 库不可跨线程传递，因此在 worker 线程内一次性 COMLibrary::new 并持有整个生命周期。
+        fn spawn_worker(&mut self) -> Option<&mpsc::SyncSender<QueryResponder>> {
+            let (req_tx, req_rx) = mpsc::sync_channel::<QueryResponder>(1);
+            std::thread::Builder::new()
+                .name("wmi-temp-worker".into())
+                .spawn(move || {
+                    let Ok(com) = COMLibrary::new() else {
+                        return;
+                    };
+                    for resp in req_rx {
+                        let _ = resp.send(
+                            Self::query_msacpi(&com).or_else(|| Self::query_perf_counters(&com)),
+                        );
+                    }
+                })
+                .ok()?;
+            Some(self.req_tx.insert(req_tx))
         }
 
-        /// 在独立线程初始化 COM(MTA) 并查询，避免污染 Tauri 主线程 STA。
-        fn query_on_worker() -> Option<Vec<(String, f32)>> {
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = tx.send(Self::query_msacpi().or_else(Self::query_perf_counters));
-            });
-            rx.recv_timeout(std::time::Duration::from_millis(300))
-                .ok()
-                .flatten()
+        /// 请求通道容量 1：try_send 失败即 worker 忙（上轮查询超时未归或挂起），
+        /// 本轮直接放弃并回退下一 Provider，绝不额外 spawn 线程；通道断开（worker panic
+        /// 或 COM 初始化失败退出）时重建一次，仍失败则视本 Provider 不可用。
+        fn query_on_worker(&mut self) -> WmiQueryResult {
+            let (resp_tx, resp_rx) = mpsc::channel();
+            let tx = match self.req_tx.clone() {
+                Some(tx) => tx,
+                None => self.spawn_worker()?.clone(),
+            };
+            match tx.try_send(resp_tx.clone()) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => return None,
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    let tx = self.spawn_worker()?.clone();
+                    if tx.try_send(resp_tx).is_err() {
+                        return None;
+                    }
+                }
+            }
+            resp_rx.recv_timeout(QUERY_TIMEOUT).ok().flatten()
         }
 
-        fn query_msacpi() -> Option<Vec<(String, f32)>> {
-            let com = Self::com()?;
-            let conn = WMIConnection::with_namespace_path(r"root\WMI", com).ok()?;
+        fn query_msacpi(com: &COMLibrary) -> Option<Vec<(String, f32)>> {
+            let conn = WMIConnection::with_namespace_path(r"root\WMI", *com).ok()?;
             let rows: Vec<MsAcpiThermalZoneTemperature> = conn
                 .raw_query(
                     "SELECT InstanceName, CurrentTemperature FROM MSAcpi_ThermalZoneTemperature",
@@ -182,9 +217,8 @@ mod windows_wmi {
             }
         }
 
-        fn query_perf_counters() -> Option<Vec<(String, f32)>> {
-            let com = Self::com()?;
-            let conn = WMIConnection::new(com).ok()?;
+        fn query_perf_counters(com: &COMLibrary) -> Option<Vec<(String, f32)>> {
+            let conn = WMIConnection::new(*com).ok()?;
             let rows: Vec<ThermalZonePerfCounter> = conn
                 .raw_query(
                     "SELECT Name, Temperature, HighPrecisionTemperature \
@@ -219,7 +253,7 @@ mod windows_wmi {
 
     impl TemperatureProvider for WindowsWmiThermalProvider {
         fn read_cpu_temp_celsius(&mut self) -> Option<f32> {
-            let readings = Self::query_on_worker()?;
+            let readings = self.query_on_worker()?;
             pick_cpu_temp(&readings)
         }
     }

@@ -7,19 +7,25 @@ mod temperature_lhm;
 
 use alert::{AlertEngine, AlertStatus, AlertThresholds, SharedAlerts};
 use config::{
-    normalize_lhm_base_url, AppConfig, OverlayEdgeX, OverlayEdgeY, OverlayStyle, SharedConfig,
+    mutate_config, normalize_lhm_base_url, AppConfig, OverlayEdgeX, OverlayEdgeY, OverlayStyle,
+    SharedConfig, DEFAULT_LHM_BASE_URL,
 };
 use history::{history_capacity_for_minutes, HistoryPoint};
-use monitor::{Metrics, MonitorState, SharedMonitor, METRICS_CACHE_MIN_INTERVAL};
+use monitor::{
+    sample_cached_shared, Metrics, MonitorState, SharedMonitor, SharedTemperature,
+    METRICS_CACHE_MIN_INTERVAL,
+};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     window::{Effect, EffectState, EffectsBuilder},
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, RunEvent, WindowEvent,
+    AppHandle, Emitter, LogicalPosition, Manager, Monitor, PhysicalPosition, PhysicalSize, RunEvent,
+    WindowEvent,
 };
 use tauri_plugin_notification::NotificationExt;
+use temperature::ChainedTemperatureProvider;
 use temperature_lhm::{LhmRuntimeConfig, TempSourceKind, TempSourceTracker};
 
 pub type SharedSettingsOpen = Mutex<bool>;
@@ -29,11 +35,14 @@ pub type SharedOverlayMenu = Mutex<Option<CheckMenuItem<tauri::Wry>>>;
 pub struct SharedOverlayPosSave(pub Mutex<Option<Instant>>);
 pub struct SharedOverlayLastMove(pub Mutex<Option<Instant>>);
 pub struct SharedOverlaySnapQuietUntil(pub Mutex<Option<Instant>>);
+pub struct SharedMainPosSave(pub Mutex<Option<Instant>>);
+pub struct SharedMainLastMove(pub Mutex<Option<Instant>>);
 
 const OVERLAY_SNAP_THRESHOLD_PX: i32 = 36;
 const OVERLAY_SNAP_CORNER_BONUS_PX: i32 = 12;
 const OVERLAY_SNAP_DEBOUNCE_MS: u64 = 220;
 const OVERLAY_LAYOUT_QUIET_MS: u64 = 500;
+const MAIN_POS_SAVE_DEBOUNCE_MS: u64 = 250;
 const OVERLAY_COLLAPSED_WIDTH: u32 = 310;
 const OVERLAY_COLLAPSED_HEIGHT: u32 = 38;
 const OVERLAY_VERTICAL_WIDTH: u32 = 72;
@@ -128,15 +137,13 @@ fn temp_source_message(
 fn get_metrics(
     app: tauri::AppHandle,
     monitor: tauri::State<'_, SharedMonitor>,
+    temperature: tauri::State<'_, SharedTemperature>,
     alerts: tauri::State<'_, SharedAlerts>,
     config: tauri::State<'_, SharedConfig>,
     tracker: tauri::State<'_, SharedTempTracker>,
 ) -> Result<MetricsResponse, String> {
-    let metrics = {
-        let mut monitor = monitor.lock().map_err(|e| e.to_string())?;
-        // 主面板与叠加层共用短时缓存，避免双采样打乱网速差分
-        monitor.sample_cached(METRICS_CACHE_MIN_INTERVAL)
-    };
+    // 主面板与叠加层共用短时缓存，避免双采样打乱网速差分；温度 IO 在 monitor 锁外进行
+    let metrics = sample_cached_shared(&monitor, &temperature, METRICS_CACHE_MIN_INTERVAL)?;
 
     let temp_source = tracker.get().as_str().to_string();
 
@@ -187,17 +194,16 @@ fn set_alert_thresholds(
 ) -> Result<AlertThresholds, String> {
     thresholds.validate()?;
 
+    mutate_config(&config, |next| {
+        next.alert = thresholds.clone();
+        Ok(())
+    })?;
+
     let saved = {
         let mut engine = alerts.lock().map_err(|e| e.to_string())?;
         engine.set_thresholds(thresholds);
         engine.thresholds()
     };
-
-    {
-        let mut cfg = config.lock().map_err(|e| e.to_string())?;
-        cfg.alert = saved.clone();
-        cfg.save()?;
-    }
 
     Ok(saved)
 }
@@ -223,15 +229,17 @@ fn set_notification_enabled(
     app: AppHandle,
     config: tauri::State<'_, SharedConfig>,
 ) -> Result<bool, String> {
-    {
-        let mut cfg = config.lock().map_err(|e| e.to_string())?;
-        cfg.notification_enabled = enabled;
-        cfg.save()?;
+    // 权限校验前置，失败时零副作用
+    if enabled && !ensure_notification_permission(&app) {
+        return Err("系统通知权限未授予，请在 Windows 通知设置中允许本应用".to_string());
     }
+
+    mutate_config(&config, |next| {
+        next.notification_enabled = enabled;
+        Ok(())
+    })?;
+
     if enabled {
-        if !ensure_notification_permission(&app) {
-            return Err("系统通知权限未授予，请在 Windows 通知设置中允许本应用".to_string());
-        }
         // 开启时发一条测试通知，便于确认权限与系统开关正常
         if let Err(err) = app
             .notification()
@@ -254,16 +262,15 @@ fn set_history_range_minutes(
 ) -> Result<u32, String> {
     let capacity = history_capacity_for_minutes(minutes)?;
 
-    // 先改内存历史容量，再持久化配置，避免持有两把锁
+    mutate_config(&config, |next| {
+        next.history_range_minutes = minutes;
+        Ok(())
+    })?;
+
+    // 历史容量与配置分时加锁，提交成功后再调整内存容量
     {
         let mut monitor = monitor.lock().map_err(|e| e.to_string())?;
         monitor.set_history_capacity(capacity);
-    }
-
-    {
-        let mut cfg = config.lock().map_err(|e| e.to_string())?;
-        cfg.history_range_minutes = minutes;
-        cfg.save()?;
     }
 
     Ok(minutes)
@@ -275,11 +282,10 @@ fn set_precise_temp_enabled(
     config: tauri::State<'_, SharedConfig>,
     lhm: tauri::State<'_, SharedLhmRuntime>,
 ) -> Result<bool, String> {
-    {
-        let mut cfg = config.lock().map_err(|e| e.to_string())?;
-        cfg.precise_temp_enabled = enabled;
-        cfg.save()?;
-    }
+    mutate_config(&config, |next| {
+        next.precise_temp_enabled = enabled;
+        Ok(())
+    })?;
     lhm.set_enabled(enabled);
     Ok(enabled)
 }
@@ -291,13 +297,163 @@ fn set_lhm_base_url(
     lhm: tauri::State<'_, SharedLhmRuntime>,
 ) -> Result<String, String> {
     let normalized = normalize_lhm_base_url(&url)?;
-    {
-        let mut cfg = config.lock().map_err(|e| e.to_string())?;
-        cfg.lhm_base_url = normalized.clone();
-        cfg.save()?;
-    }
+    mutate_config(&config, |next| {
+        next.lhm_base_url = normalized.clone();
+        Ok(())
+    })?;
     lhm.set_base_url(normalized.clone());
     Ok(normalized)
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsInput {
+    thresholds: AlertThresholds,
+    notification_enabled: bool,
+    history_range_minutes: u32,
+    precise_temp_enabled: bool,
+    lhm_base_url: String,
+    overlay_enabled: bool,
+    autostart_enabled: bool,
+    overlay_auto_hide: bool,
+    overlay_style: String,
+}
+
+impl SettingsInput {
+    fn defaults() -> Self {
+        Self {
+            thresholds: AlertThresholds::default(),
+            notification_enabled: true,
+            history_range_minutes: 1,
+            precise_temp_enabled: false,
+            lhm_base_url: DEFAULT_LHM_BASE_URL.to_string(),
+            overlay_enabled: false,
+            autostart_enabled: false,
+            overlay_auto_hide: false,
+            overlay_style: "capsule".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsResponse {
+    alert: AlertThresholds,
+    notification_enabled: bool,
+    history_range_minutes: u32,
+    precise_temp_enabled: bool,
+    lhm_base_url: String,
+    overlay_enabled: bool,
+    autostart_enabled: bool,
+    overlay_auto_hide: bool,
+    overlay_style: String,
+}
+
+/// 设置页聚合保存：全部校验与可失败操作通过后仅落盘一次，避免中途失败导致部分生效
+fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<SettingsResponse, String> {
+    let alerts = app.state::<SharedAlerts>();
+    let monitor = app.state::<SharedMonitor>();
+    let config = app.state::<SharedConfig>();
+    let lhm = app.state::<SharedLhmRuntime>();
+
+    // 校验前置：最易失败的操作先做，任一失败即中止且无副作用
+    let normalized_lhm = normalize_lhm_base_url(&input.lhm_base_url)?;
+    input.thresholds.validate()?;
+    let capacity = history_capacity_for_minutes(input.history_range_minutes)?;
+    let parsed_style =
+        OverlayStyle::parse(&input.overlay_style).ok_or_else(|| "无效的叠加层形态".to_string())?;
+
+    // 可失败的外部系统操作先于任何内存修改与落盘
+    if input.notification_enabled && !ensure_notification_permission(app) {
+        return Err("系统通知权限未授予，请在 Windows 通知设置中允许本应用".to_string());
+    }
+    // 自启特例：先执行系统操作，成功后才随下方事务落盘；save 失败时系统已改而配置未变，
+    // 由下次启动 sync_autostart_with_config 收敛（自愈），无需回滚系统状态
+    apply_autostart_system(app, input.autostart_enabled)?;
+
+    // 关闭叠加层时把最后位置并入本次唯一一次落盘，避免 hide 内部再写盘
+    let overlay_pos = if !input.overlay_enabled {
+        app.get_webview_window("overlay")
+            .and_then(|window| window.outer_position().ok())
+    } else {
+        None
+    };
+
+    // 副本事务：唯一一次落盘，失败则内存与磁盘保持原状
+    mutate_config(&config, |next| {
+        next.alert = input.thresholds.clone();
+        next.notification_enabled = input.notification_enabled;
+        next.history_range_minutes = input.history_range_minutes;
+        next.precise_temp_enabled = input.precise_temp_enabled;
+        next.lhm_base_url = normalized_lhm.clone();
+        next.overlay_enabled = input.overlay_enabled;
+        next.autostart_enabled = input.autostart_enabled;
+        next.overlay_auto_hide = input.overlay_auto_hide;
+        next.overlay_style = parsed_style;
+        if let Some(pos) = overlay_pos {
+            next.overlay_x = Some(pos.x);
+            next.overlay_y = Some(pos.y);
+        }
+        Ok(())
+    })?;
+
+    // 提交成功后的副作用，尽力而为不阻断
+    {
+        let mut engine = alerts.lock().map_err(|e| e.to_string())?;
+        engine.set_thresholds(input.thresholds.clone());
+    }
+    monitor
+        .lock()
+        .map_err(|e| e.to_string())?
+        .set_history_capacity(capacity);
+
+    lhm.set_enabled(input.precise_temp_enabled);
+    lhm.set_base_url(normalized_lhm.clone());
+
+    if input.overlay_enabled {
+        show_overlay_window(app);
+    } else {
+        hide_overlay_window(app, false);
+    }
+    sync_overlay_menu_checked(app, input.overlay_enabled);
+    let _ = app.emit("overlay-enabled-changed", input.overlay_enabled);
+    let _ = app.emit("overlay-auto-hide-changed", input.overlay_auto_hide);
+    let _ = app.emit("overlay-style-changed", parsed_style.as_str());
+
+    if input.notification_enabled {
+        // 测试通知失败不影响保存结果
+        if let Err(err) = app
+            .notification()
+            .builder()
+            .title("系统监测")
+            .body("已启用系统通知")
+            .show()
+        {
+            eprintln!("发送测试通知失败: {err}");
+        }
+    }
+
+    Ok(SettingsResponse {
+        alert: input.thresholds,
+        notification_enabled: input.notification_enabled,
+        history_range_minutes: input.history_range_minutes,
+        precise_temp_enabled: input.precise_temp_enabled,
+        lhm_base_url: normalized_lhm,
+        overlay_enabled: input.overlay_enabled,
+        autostart_enabled: input.autostart_enabled,
+        overlay_auto_hide: input.overlay_auto_hide,
+        overlay_style: parsed_style.as_str().to_string(),
+    })
+}
+
+#[tauri::command]
+fn apply_settings(settings: SettingsInput, app: AppHandle) -> Result<SettingsResponse, String> {
+    apply_settings_impl(&app, settings)
+}
+
+#[tauri::command]
+fn apply_settings_reset(app: AppHandle) -> Result<SettingsResponse, String> {
+    apply_settings_impl(&app, SettingsInput::defaults())
 }
 
 #[tauri::command]
@@ -345,26 +501,30 @@ fn set_autostart_enabled(enabled: bool, app: AppHandle) -> Result<bool, String> 
     apply_autostart_enabled(&app, enabled)
 }
 
-fn apply_autostart_enabled(app: &AppHandle, enabled: bool) -> Result<bool, String> {
+fn apply_autostart_system(app: &AppHandle, enabled: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt;
-
-    {
-        let state = app.state::<SharedConfig>();
-        let mut cfg = state.lock().map_err(|e| e.to_string())?;
-        cfg.autostart_enabled = enabled;
-        cfg.save()?;
-    }
 
     let autostart = app.autolaunch();
     if enabled {
         autostart
             .enable()
-            .map_err(|e| format!("启用开机自启失败: {e}"))?;
+            .map_err(|e| format!("启用开机自启失败: {e}"))
     } else {
         autostart
             .disable()
-            .map_err(|e| format!("关闭开机自启失败: {e}"))?;
+            .map_err(|e| format!("关闭开机自启失败: {e}"))
     }
+}
+
+fn apply_autostart_enabled(app: &AppHandle, enabled: bool) -> Result<bool, String> {
+    // 特例：先执行系统操作，成功后才落盘；save 失败时系统已改而配置未变，
+    // 由下次启动 sync_autostart_with_config 收敛（自愈），无需回滚系统状态
+    apply_autostart_system(app, enabled)?;
+
+    mutate_config(&app.state::<SharedConfig>(), |next| {
+        next.autostart_enabled = enabled;
+        Ok(())
+    })?;
 
     Ok(enabled)
 }
@@ -578,12 +738,10 @@ fn set_overlay_layout(mode: String, app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn set_overlay_auto_hide(enabled: bool, app: AppHandle) -> Result<bool, String> {
-    {
-        let state = app.state::<SharedConfig>();
-        let mut cfg = state.lock().map_err(|e| e.to_string())?;
-        cfg.overlay_auto_hide = enabled;
-        cfg.save()?;
-    }
+    mutate_config(&app.state::<SharedConfig>(), |next| {
+        next.overlay_auto_hide = enabled;
+        Ok(())
+    })?;
     let _ = app.emit("overlay-auto-hide-changed", enabled);
     Ok(enabled)
 }
@@ -591,12 +749,10 @@ fn set_overlay_auto_hide(enabled: bool, app: AppHandle) -> Result<bool, String> 
 #[tauri::command]
 fn set_overlay_style(style: String, app: AppHandle) -> Result<String, String> {
     let parsed = OverlayStyle::parse(&style).ok_or_else(|| "无效的叠加层形态".to_string())?;
-    {
-        let state = app.state::<SharedConfig>();
-        let mut cfg = state.lock().map_err(|e| e.to_string())?;
-        cfg.overlay_style = parsed;
-        cfg.save()?;
-    }
+    mutate_config(&app.state::<SharedConfig>(), |next| {
+        next.overlay_style = parsed;
+        Ok(())
+    })?;
     let _ = app.emit("overlay-style-changed", parsed.as_str());
     Ok(parsed.as_str().to_string())
 }
@@ -641,14 +797,15 @@ fn persist_overlay_position(
     edge_x: Option<OverlayEdgeX>,
     edge_y: Option<OverlayEdgeY>,
 ) {
-    if let Ok(mut cfg) = app.state::<SharedConfig>().lock() {
-        cfg.overlay_x = Some(x);
-        cfg.overlay_y = Some(y);
-        cfg.overlay_edge_x = edge_x;
-        cfg.overlay_edge_y = edge_y;
-        if let Err(err) = cfg.save() {
-            eprintln!("保存叠加层位置失败: {err}");
-        }
+    // 位置落盘失败仅保留旧值，下次移动再写
+    if let Err(err) = mutate_config(&app.state::<SharedConfig>(), |next| {
+        next.overlay_x = Some(x);
+        next.overlay_y = Some(y);
+        next.overlay_edge_x = edge_x;
+        next.overlay_edge_y = edge_y;
+        Ok(())
+    }) {
+        eprintln!("保存叠加层位置失败: {err}");
     }
 }
 
@@ -772,14 +929,21 @@ fn schedule_overlay_position_save(app: &AppHandle) {
         return;
     };
 
-    if let Ok(quiet) = app.state::<SharedOverlaySnapQuietUntil>().0.lock() {
-        if quiet.map(|t| Instant::now() < t).unwrap_or(false) {
-            if let Ok(mut cfg) = app.state::<SharedConfig>().lock() {
-                cfg.overlay_x = Some(pos.x);
-                cfg.overlay_y = Some(pos.y);
-            }
-            return;
+    // 仅在 quiet 锁内读取判断结果，cfg 锁移到临界区外，避免嵌套持锁
+    let in_quiet = app
+        .state::<SharedOverlaySnapQuietUntil>()
+        .0
+        .lock()
+        .ok()
+        .and_then(|quiet| *quiet)
+        .map(|t| Instant::now() < t)
+        .unwrap_or(false);
+    if in_quiet {
+        if let Ok(mut cfg) = app.state::<SharedConfig>().lock() {
+            cfg.overlay_x = Some(pos.x);
+            cfg.overlay_y = Some(pos.y);
         }
+        return;
     }
 
     if let Ok(mut cfg) = app.state::<SharedConfig>().lock() {
@@ -837,33 +1001,33 @@ fn show_overlay_window(app: &AppHandle) {
     }
 }
 
-fn hide_overlay_window(app: &AppHandle) {
+fn hide_overlay_window(app: &AppHandle, persist_position: bool) {
     if let Some(window) = app.get_webview_window("overlay") {
-        // 隐藏前落盘当前位置（保留已记录的贴边方向）
-        if let Ok(pos) = window.outer_position() {
-            let (edge_x, edge_y) = app
-                .state::<SharedConfig>()
-                .lock()
-                .map(|cfg| (cfg.overlay_edge_x, cfg.overlay_edge_y))
-                .unwrap_or((None, None));
-            persist_overlay_position(app, pos.x, pos.y, edge_x, edge_y);
+        // 隐藏前落盘当前位置（保留已记录的贴边方向）；聚合保存路径已并入唯一一次落盘，跳过
+        if persist_position {
+            if let Ok(pos) = window.outer_position() {
+                let (edge_x, edge_y) = app
+                    .state::<SharedConfig>()
+                    .lock()
+                    .map(|cfg| (cfg.overlay_edge_x, cfg.overlay_edge_y))
+                    .unwrap_or((None, None));
+                persist_overlay_position(app, pos.x, pos.y, edge_x, edge_y);
+            }
         }
         let _ = window.hide();
     }
 }
 
 fn apply_overlay_enabled(app: &AppHandle, enabled: bool) -> Result<bool, String> {
-    {
-        let state = app.state::<SharedConfig>();
-        let mut cfg = state.lock().map_err(|e| e.to_string())?;
-        cfg.overlay_enabled = enabled;
-        cfg.save()?;
-    }
+    mutate_config(&app.state::<SharedConfig>(), |next| {
+        next.overlay_enabled = enabled;
+        Ok(())
+    })?;
 
     if enabled {
         show_overlay_window(app);
     } else {
-        hide_overlay_window(app);
+        hide_overlay_window(app, true);
     }
 
     sync_overlay_menu_checked(app, enabled);
@@ -872,11 +1036,12 @@ fn apply_overlay_enabled(app: &AppHandle, enabled: bool) -> Result<bool, String>
 }
 
 fn persist_main_position(app: &AppHandle, x: i32, y: i32) {
-    if let Ok(mut cfg) = app.state::<SharedConfig>().lock() {
-        cfg.main_x = Some(x);
-        cfg.main_y = Some(y);
-        let _ = cfg.save();
-    }
+    // 位置落盘失败仅保留旧值，下次移动再写
+    let _ = mutate_config(&app.state::<SharedConfig>(), |next| {
+        next.main_x = Some(x);
+        next.main_y = Some(y);
+        Ok(())
+    });
 }
 
 fn restore_main_position(window: &tauri::WebviewWindow, cfg: &AppConfig) -> bool {
@@ -900,17 +1065,107 @@ fn schedule_main_position_save(app: &AppHandle) {
         cfg.main_y = Some(pos.y);
     }
 
+    // 双重节流：LastMove 去抖（拖动中线程静默退出，仅最后一次落盘）+ PosSave 限制最小写盘间隔
+    let now = Instant::now();
+    if let Ok(mut last) = app.state::<SharedMainLastMove>().0.lock() {
+        *last = Some(now);
+    }
+
     let app_handle = app.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(250));
-        let Some(window) = app_handle.get_webview_window("main") else {
+        std::thread::sleep(Duration::from_millis(MAIN_POS_SAVE_DEBOUNCE_MS));
+        let still = app_handle
+            .state::<SharedMainLastMove>()
+            .0
+            .lock()
+            .ok()
+            .and_then(|guard| *guard)
+            .map(|t| {
+                Instant::now().duration_since(t)
+                    >= Duration::from_millis(MAIN_POS_SAVE_DEBOUNCE_MS - 20)
+            })
+            .unwrap_or(false);
+        if !still {
             return;
+        }
+
+        let now = Instant::now();
+        let should_write = {
+            let state = app_handle.state::<SharedMainPosSave>();
+            let Ok(mut last) = state.0.lock() else {
+                return;
+            };
+            let due = last
+                .map(|t| now.duration_since(t) >= Duration::from_millis(200))
+                .unwrap_or(true);
+            if due {
+                *last = Some(now);
+            }
+            due
         };
-        let Ok(pos) = window.outer_position() else {
-            return;
-        };
-        persist_main_position(&app_handle, pos.x, pos.y);
+        if should_write {
+            let Some(window) = app_handle.get_webview_window("main") else {
+                return;
+            };
+            let Ok(pos) = window.outer_position() else {
+                return;
+            };
+            persist_main_position(&app_handle, pos.x, pos.y);
+        }
     });
+}
+
+fn monitor_at_physical_point(
+    window: &tauri::WebviewWindow,
+    x: i32,
+    y: i32,
+) -> Option<Monitor> {
+    if let Ok(monitors) = window.available_monitors() {
+        for monitor in monitors {
+            let origin = monitor.position();
+            let size = monitor.size();
+            let right = origin.x.saturating_add(size.width as i32);
+            let bottom = origin.y.saturating_add(size.height as i32);
+            if x >= origin.x && x < right && y >= origin.y && y < bottom {
+                return Some(monitor);
+            }
+        }
+    }
+    window.primary_monitor().ok().flatten()
+}
+
+fn monitor_at_logical_point(
+    window: &tauri::WebviewWindow,
+    pos: LogicalPosition<f64>,
+) -> Option<Monitor> {
+    if let Ok(monitors) = window.available_monitors() {
+        for monitor in monitors {
+            // 各显示器按自身 scale 折算为逻辑范围后匹配
+            let scale = monitor.scale_factor();
+            let origin = monitor.position();
+            let size = monitor.size();
+            let lx = origin.x as f64 / scale;
+            let ly = origin.y as f64 / scale;
+            let lw = size.width as f64 / scale;
+            let lh = size.height as f64 / scale;
+            if pos.x >= lx && pos.x < lx + lw && pos.y >= ly && pos.y < ly + lh {
+                return Some(monitor);
+            }
+        }
+    }
+    window.primary_monitor().ok().flatten()
+}
+
+fn tray_event_scale(window: Option<tauri::WebviewWindow>, position: tauri::Position) -> f64 {
+    let Some(window) = window else {
+        return 1.0;
+    };
+    match position {
+        tauri::Position::Physical(p) => monitor_at_physical_point(&window, p.x, p.y),
+        tauri::Position::Logical(p) => monitor_at_logical_point(&window, p),
+    }
+    .map(|m| m.scale_factor())
+    .unwrap_or(1.0)
 }
 
 fn show_panel(app: &tauri::AppHandle, tray_rect: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>) {
@@ -924,9 +1179,26 @@ fn show_panel(app: &tauri::AppHandle, tray_rect: Option<(PhysicalPosition<i32>, 
         if !restored {
             if let Some((pos, size)) = tray_rect {
                 let win_size = window.outer_size().unwrap_or(PhysicalSize::new(380, 690));
-                let x = pos.x + (size.width as i32 / 2) - (win_size.width as i32 / 2);
-                let y = pos.y.saturating_sub(win_size.height as i32 + 8);
-                let physical = PhysicalPosition::new(x.max(0), y.max(0));
+                let win_w = win_size.width as i32;
+                let win_h = win_size.height as i32;
+                let mut x = pos.x + (size.width as i32 / 2) - (win_w / 2);
+                let mut y = pos.y.saturating_sub(win_h + 8);
+                // 以托盘所在显示器工作区收拢，避免顶部任务栏遮挡或负坐标屏外落位
+                if let Some(monitor) = monitor_at_physical_point(&window, pos.x, pos.y) {
+                    let work = monitor.work_area();
+                    let left = work.position.x;
+                    let top = work.position.y;
+                    let right = work.position.x.saturating_add(work.size.width as i32);
+                    let bottom = work.position.y.saturating_add(work.size.height as i32);
+                    let max_x = (right - win_w).max(left);
+                    let max_y = (bottom - win_h).max(top);
+                    x = x.clamp(left, max_x);
+                    y = y.clamp(top, max_y);
+                } else {
+                    x = x.max(0);
+                    y = y.max(0);
+                }
+                let physical = PhysicalPosition::new(x, y);
                 let _ = window.set_position(physical);
                 persist_main_position(app, physical.x, physical.y);
             }
@@ -977,6 +1249,10 @@ pub fn run() {
         initial_config.lhm_base_url.clone(),
     );
     let temp_tracker = TempSourceTracker::new();
+    let temperature_provider = ChainedTemperatureProvider::platform_default(
+        Arc::clone(&lhm_runtime),
+        Arc::clone(&temp_tracker),
+    );
 
     tauri::Builder::default()
         // 须最先注册：二次启动时唤醒已有实例并显示主面板
@@ -987,12 +1263,9 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .manage(
-            Mutex::new(MonitorState::with_history_capacity(
-                history_capacity,
-                Arc::clone(&lhm_runtime),
-                Arc::clone(&temp_tracker),
-            )) as SharedMonitor,
+            Mutex::new(MonitorState::with_history_capacity(history_capacity)) as SharedMonitor,
         )
+        .manage(Mutex::new(temperature_provider) as SharedTemperature)
         .manage(Mutex::new(initial_alerts) as SharedAlerts)
         .manage(Mutex::new(initial_config) as SharedConfig)
         .manage(Mutex::new(false) as SharedSettingsOpen)
@@ -1000,6 +1273,8 @@ pub fn run() {
         .manage(SharedOverlayPosSave(Mutex::new(None)))
         .manage(SharedOverlayLastMove(Mutex::new(None)))
         .manage(SharedOverlaySnapQuietUntil(Mutex::new(None)))
+        .manage(SharedMainPosSave(Mutex::new(None)))
+        .manage(SharedMainLastMove(Mutex::new(None)))
         .manage(lhm_runtime as SharedLhmRuntime)
         .manage(temp_tracker as SharedTempTracker)
         .invoke_handler(tauri::generate_handler![
@@ -1020,7 +1295,9 @@ pub fn run() {
             set_overlay_layout,
             set_overlay_auto_hide,
             set_overlay_style,
-            set_autostart_enabled
+            set_autostart_enabled,
+            apply_settings,
+            apply_settings_reset
         ])
         .setup(|app| {
             sync_autostart_with_config(app.handle());
@@ -1050,8 +1327,12 @@ pub fn run() {
             }
             let menu = Menu::with_items(app, &[&show, &overlay_item, &alert_settings, &quit])?;
 
+            let tray_icon = app
+                .default_window_icon()
+                .cloned()
+                .unwrap_or_else(|| tauri::include_image!("icons/32x32.png"));
             let _tray = TrayIconBuilder::with_id("main")
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(tray_icon)
                 .tooltip("系统监测")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
@@ -1086,8 +1367,10 @@ pub fn run() {
                     } = event
                     {
                         let app = tray.app_handle();
-                        let position = rect.position.to_physical(1.0);
-                        let size = rect.size.to_physical(1.0);
+                        // 托盘 rect 按点击点所在显示器 scale 换算，取不到时回退 1.0
+                        let scale = tray_event_scale(app.get_webview_window("main"), rect.position);
+                        let position = rect.position.to_physical(scale);
+                        let size = rect.size.to_physical(scale);
                         toggle_panel(app, Some((position, size)));
                     }
                 })

@@ -22,6 +22,7 @@ interface Metrics {
 type OverlayStyle = 'capsule' | 'vertical' | 'numeric';
 
 interface AppConfig {
+  overlayEnabled?: boolean;
   overlayAutoHide: boolean;
   overlayStyle?: OverlayStyle;
   overlayEdgeX?: 'left' | 'right' | null;
@@ -37,8 +38,24 @@ let autoHide = false;
 let edgeX: 'left' | 'right' | null = null;
 let hideTimer: number | undefined;
 let pinnedExpanded = false;
+let pollTimer: number | undefined;
+let overlayEnabled = true;
 
 const HIDE_DELAY_MS = 900;
+
+function startPolling() {
+  if (pollTimer !== undefined) return;
+  pollTimer = window.setInterval(() => {
+    void refreshOverlay();
+  }, 1000);
+}
+
+function stopPolling() {
+  if (pollTimer !== undefined) {
+    window.clearInterval(pollTimer);
+    pollTimer = undefined;
+  }
+}
 
 function canPeekHide(): boolean {
   return autoHide && !!edgeX;
@@ -126,6 +143,8 @@ async function setMode(next: OverlayMode) {
     await invoke('set_overlay_layout', { mode: next });
     mode = next;
     applyModeClass(mode);
+    // 每秒只更新当前可见视图，切换后需立即刷新一次新视图
+    void refreshOverlay();
   } catch (error) {
     console.error('切换叠加层布局失败', error);
   } finally {
@@ -185,6 +204,7 @@ async function applyOverlayStyle(next: OverlayStyle) {
 async function loadOverlayConfig() {
   try {
     const cfg = await invoke<AppConfig>('get_app_config');
+    overlayEnabled = cfg.overlayEnabled !== false;
     autoHide = !!cfg.overlayAutoHide;
     edgeX = cfg.overlayEdgeX === 'left' || cfg.overlayEdgeX === 'right' ? cfg.overlayEdgeX : null;
     await applyOverlayStyle(normalizeStyle(cfg.overlayStyle));
@@ -198,112 +218,139 @@ async function loadOverlayConfig() {
   }
 }
 
+function updateExpandedPanel(metrics: Metrics) {
+  const alert = metrics.alert;
+
+  const alertFlag = document.querySelector('#overlay-alert-flag') as HTMLElement | null;
+  if (alertFlag) alertFlag.hidden = !alert.active;
+
+  setText('ov-cpu', `${metrics.cpuPercent.toFixed(0)}%`);
+  setText('ov-mem', `${metrics.memoryPercent.toFixed(0)}%`);
+  setText(
+    'ov-temp',
+    metrics.cpuTempCelsius == null ? '--' : `${metrics.cpuTempCelsius.toFixed(0)}°C`,
+  );
+  setText('ov-net-down', formatSpeedShort(metrics.netDownBps));
+  setText('ov-net-up', formatSpeedShort(metrics.netUpBps));
+
+  const updated = document.querySelector('#overlay-updated');
+  if (updated) {
+    updated.textContent = new Date(Number(metrics.sampledAtMs)).toLocaleTimeString();
+  }
+
+  setFill(
+    document.querySelector('#ov-cpu-bar') as HTMLElement | null,
+    metrics.cpuPercent,
+    alert.cpu,
+  );
+  setFill(
+    document.querySelector('#ov-mem-bar') as HTMLElement | null,
+    metrics.memoryPercent,
+    alert.memory,
+  );
+  setFill(
+    document.querySelector('#ov-temp-bar') as HTMLElement | null,
+    tempPercent(metrics.cpuTempCelsius),
+    alert.temperature,
+  );
+
+  setRowAlert('ov-cpu-card', alert.cpu);
+  setRowAlert('ov-mem-card', alert.memory);
+  setRowAlert('ov-temp-card', alert.temperature);
+}
+
+function updateCapsuleStrip(metrics: Metrics) {
+  const alert = metrics.alert;
+
+  const stripAlert = document.querySelector('#strip-alert') as HTMLElement | null;
+  if (stripAlert) stripAlert.hidden = !alert.active;
+
+  setText('strip-cpu', `${metrics.cpuPercent.toFixed(0)}%`);
+  setText('strip-mem', `${metrics.memoryPercent.toFixed(0)}%`);
+  setText(
+    'strip-temp',
+    metrics.cpuTempCelsius == null ? '--' : `${metrics.cpuTempCelsius.toFixed(0)}°C`,
+  );
+  setText('strip-net-down', formatSpeedShort(metrics.netDownBps));
+  setText('strip-net-up', formatSpeedShort(metrics.netUpBps));
+
+  setDot(
+    document.querySelector('#strip-cpu-dot') as HTMLElement | null,
+    metrics.cpuPercent,
+    alert.cpu,
+  );
+  setDot(
+    document.querySelector('#strip-mem-dot') as HTMLElement | null,
+    metrics.memoryPercent,
+    alert.memory,
+  );
+  setDot(
+    document.querySelector('#strip-temp-dot') as HTMLElement | null,
+    tempPercent(metrics.cpuTempCelsius),
+    alert.temperature,
+  );
+
+  document.querySelector('.strip-metric[data-metric="cpu"]')?.classList.toggle('alert', alert.cpu);
+  document
+    .querySelector('.strip-metric[data-metric="mem"]')
+    ?.classList.toggle('alert', alert.memory);
+  document
+    .querySelector('.strip-metric[data-metric="temp"]')
+    ?.classList.toggle('alert', alert.temperature);
+}
+
+function updateNumericStrip(metrics: Metrics) {
+  const alert = metrics.alert;
+
+  setText('num-cpu', metrics.cpuPercent.toFixed(0));
+  setText('num-mem', metrics.memoryPercent.toFixed(0));
+  setText('num-temp', metrics.cpuTempCelsius == null ? '--' : metrics.cpuTempCelsius.toFixed(0));
+  setText(
+    'num-net',
+    `↓${formatSpeedShort(metrics.netDownBps)} ↑${formatSpeedShort(metrics.netUpBps)}`,
+  );
+
+  document.querySelector('#num-cpu')?.classList.toggle('alert', alert.cpu);
+  document.querySelector('#num-mem')?.classList.toggle('alert', alert.memory);
+  document.querySelector('#num-temp')?.classList.toggle('alert', alert.temperature);
+}
+
+function updateVerticalStrip(metrics: Metrics) {
+  const alert = metrics.alert;
+
+  setText('v-cpu', `${metrics.cpuPercent.toFixed(0)}%`);
+  setText('v-mem', `${metrics.memoryPercent.toFixed(0)}%`);
+  setText(
+    'v-temp',
+    metrics.cpuTempCelsius == null ? '--' : `${metrics.cpuTempCelsius.toFixed(0)}°C`,
+  );
+  setText('v-net', `↓${formatSpeedShort(metrics.netDownBps)}`);
+  setText('v-net-up', `↑${formatSpeedShort(metrics.netUpBps)}`);
+
+  document.querySelector('.v-item[data-metric="cpu"]')?.classList.toggle('alert', alert.cpu);
+  document.querySelector('.v-item[data-metric="mem"]')?.classList.toggle('alert', alert.memory);
+  document
+    .querySelector('.v-item[data-metric="temp"]')
+    ?.classList.toggle('alert', alert.temperature);
+}
+
+function refreshActiveView(metrics: Metrics) {
+  document.querySelector('#overlay-root')?.classList.toggle('alert', metrics.alert.active);
+  if (mode === 'expanded') {
+    updateExpandedPanel(metrics);
+    return;
+  }
+  if (mode === 'peek') {
+    return;
+  }
+  if (style === 'capsule') updateCapsuleStrip(metrics);
+  else if (style === 'numeric') updateNumericStrip(metrics);
+  else updateVerticalStrip(metrics);
+}
+
 async function refreshOverlay() {
   try {
-    const metrics = await invoke<Metrics>('get_metrics');
-    const alert = metrics.alert;
-
-    document.querySelector('#overlay-root')?.classList.toggle('alert', alert.active);
-
-    const alertFlag = document.querySelector('#overlay-alert-flag') as HTMLElement | null;
-    if (alertFlag) alertFlag.hidden = !alert.active;
-
-    const stripAlert = document.querySelector('#strip-alert') as HTMLElement | null;
-    if (stripAlert) stripAlert.hidden = !alert.active;
-
-    const cpuText = `${metrics.cpuPercent.toFixed(0)}%`;
-    const memText = `${metrics.memoryPercent.toFixed(0)}%`;
-    const tempText =
-      metrics.cpuTempCelsius == null ? '--' : `${metrics.cpuTempCelsius.toFixed(0)}°C`;
-    const downText = formatSpeedShort(metrics.netDownBps);
-    const upText = formatSpeedShort(metrics.netUpBps);
-    const cpuNum = metrics.cpuPercent.toFixed(0);
-    const memNum = metrics.memoryPercent.toFixed(0);
-    const tempNum = metrics.cpuTempCelsius == null ? '--' : metrics.cpuTempCelsius.toFixed(0);
-
-    setText('ov-cpu', cpuText);
-    setText('ov-mem', memText);
-    setText('ov-temp', tempText);
-    setText('ov-net-down', downText);
-    setText('ov-net-up', upText);
-
-    setText('strip-cpu', cpuText);
-    setText('strip-mem', memText);
-    setText('strip-temp', tempText);
-    setText('strip-net-down', downText);
-    setText('strip-net-up', upText);
-
-    setText('num-cpu', cpuNum);
-    setText('num-mem', memNum);
-    setText('num-temp', tempNum);
-    setText('num-net', `↓${downText} ↑${upText}`);
-
-    setText('v-cpu', cpuText);
-    setText('v-mem', memText);
-    setText('v-temp', tempText);
-    setText('v-net', `↓${downText}`);
-    setText('v-net-up', `↑${upText}`);
-
-    const updated = document.querySelector('#overlay-updated');
-    if (updated) {
-      updated.textContent = new Date(Number(metrics.sampledAtMs)).toLocaleTimeString();
-    }
-
-    setFill(
-      document.querySelector('#ov-cpu-bar') as HTMLElement | null,
-      metrics.cpuPercent,
-      alert.cpu,
-    );
-    setFill(
-      document.querySelector('#ov-mem-bar') as HTMLElement | null,
-      metrics.memoryPercent,
-      alert.memory,
-    );
-    setFill(
-      document.querySelector('#ov-temp-bar') as HTMLElement | null,
-      tempPercent(metrics.cpuTempCelsius),
-      alert.temperature,
-    );
-
-    setDot(
-      document.querySelector('#strip-cpu-dot') as HTMLElement | null,
-      metrics.cpuPercent,
-      alert.cpu,
-    );
-    setDot(
-      document.querySelector('#strip-mem-dot') as HTMLElement | null,
-      metrics.memoryPercent,
-      alert.memory,
-    );
-    setDot(
-      document.querySelector('#strip-temp-dot') as HTMLElement | null,
-      tempPercent(metrics.cpuTempCelsius),
-      alert.temperature,
-    );
-
-    setRowAlert('ov-cpu-card', alert.cpu);
-    setRowAlert('ov-mem-card', alert.memory);
-    setRowAlert('ov-temp-card', alert.temperature);
-
-    document
-      .querySelector('.strip-metric[data-metric="cpu"]')
-      ?.classList.toggle('alert', alert.cpu);
-    document
-      .querySelector('.strip-metric[data-metric="mem"]')
-      ?.classList.toggle('alert', alert.memory);
-    document
-      .querySelector('.strip-metric[data-metric="temp"]')
-      ?.classList.toggle('alert', alert.temperature);
-
-    document.querySelector('.v-item[data-metric="cpu"]')?.classList.toggle('alert', alert.cpu);
-    document.querySelector('.v-item[data-metric="mem"]')?.classList.toggle('alert', alert.memory);
-    document
-      .querySelector('.v-item[data-metric="temp"]')
-      ?.classList.toggle('alert', alert.temperature);
-
-    document.querySelector('#num-cpu')?.classList.toggle('alert', alert.cpu);
-    document.querySelector('#num-mem')?.classList.toggle('alert', alert.memory);
-    document.querySelector('#num-temp')?.classList.toggle('alert', alert.temperature);
+    refreshActiveView(await invoke<Metrics>('get_metrics'));
   } catch (error) {
     console.error('叠加层获取监测数据失败', error);
   }
@@ -368,14 +415,24 @@ window.addEventListener('DOMContentLoaded', () => {
   applyStyleClass('capsule');
   applyModeClass('collapsed');
   mode = 'collapsed';
-  void invoke('set_overlay_layout', { mode: 'collapsed' }).catch((error) => {
-    console.error('初始化叠加层尺寸失败', error);
+  // 仅按最终配置 resize 一次；窗口初始尺寸(310x38)即 collapsed capsule 尺寸，配置加载失败也无需回退
+  void loadOverlayConfig().then(() => {
+    // 后端仅在 overlay_enabled 时才显示窗口；禁用时 webview 虽存活，但不应驱动每秒采样
+    if (overlayEnabled) {
+      void refreshOverlay();
+      startPolling();
+    }
   });
-  void loadOverlayConfig();
-  void refreshOverlay();
-  window.setInterval(() => {
-    void refreshOverlay();
-  }, 1000);
+
+  void listen<boolean>('overlay-enabled-changed', (event) => {
+    overlayEnabled = !!event.payload;
+    if (overlayEnabled) {
+      startPolling();
+      void refreshOverlay();
+    } else {
+      stopPolling();
+    }
+  });
 
   void listen<boolean>('overlay-auto-hide-changed', (event) => {
     autoHide = !!event.payload;

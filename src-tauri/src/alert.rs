@@ -13,7 +13,7 @@ enum AlertKind {
     Temperature,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlertThresholds {
     /// CPU 占用阈值（%）

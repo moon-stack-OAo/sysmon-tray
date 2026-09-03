@@ -163,10 +163,7 @@ impl LibreHardwareMonitorProvider {
     }
 
     fn circuit_blocked(&self) -> bool {
-        match self.circuit_open_until {
-            Some(until) if Instant::now() < until => true,
-            _ => false,
-        }
+        matches!(self.circuit_open_until, Some(until) if Instant::now() < until)
     }
 
     fn fetch_and_parse(&self, url: &str) -> Option<f32> {

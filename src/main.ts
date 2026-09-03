@@ -62,7 +62,7 @@ interface Metrics {
   cpuTempCelsius: number | null;
   sampledAtMs: number;
   alert: AlertStatus;
-  tempSource?: string;
+  tempSource: string;
 }
 
 interface HistoryPoint {
@@ -359,6 +359,16 @@ function drawHistoryChart(points: HistoryPoint[]) {
   updateChartReadings(drawPoints[drawPoints.length - 1] ?? null, hasTemp);
 }
 
+async function refreshHistoryChart() {
+  try {
+    // get_metrics 已写入历史，再拉取快照绘制
+    const history = await invoke<HistoryPoint[]>('get_metrics_history');
+    drawHistoryChart(history);
+  } catch (error) {
+    console.error('获取监测数据失败', error);
+  }
+}
+
 async function refreshMetrics() {
   try {
     const metrics = await invoke<Metrics>('get_metrics');
@@ -428,9 +438,9 @@ async function refreshMetrics() {
       }
     }
 
-    // get_metrics 已写入历史，再拉取快照绘制
-    const history = await invoke<HistoryPoint[]>('get_metrics_history');
-    drawHistoryChart(history);
+    if (currentTab === 'monitor') {
+      await refreshHistoryChart();
+    }
 
     if (currentTab === 'settings') {
       await refreshTempSourceStatus();
@@ -464,17 +474,30 @@ function normalizeOverlayStyle(
   return 'capsule';
 }
 
-function fillSettingsForm(
-  thresholds: AlertThresholds,
-  notificationEnabled?: boolean,
-  rangeMinutes?: number,
-  preciseTempEnabled?: boolean,
-  lhmBaseUrl?: string,
-  overlayEnabled?: boolean,
-  autostartEnabled?: boolean,
-  overlayAutoHide?: boolean,
-  overlayStyle?: 'capsule' | 'vertical' | 'numeric',
-) {
+interface SettingsFormValues {
+  thresholds: AlertThresholds;
+  notificationEnabled?: boolean;
+  rangeMinutes?: number;
+  preciseTempEnabled?: boolean;
+  lhmBaseUrl?: string;
+  overlayEnabled?: boolean;
+  autostartEnabled?: boolean;
+  overlayAutoHide?: boolean;
+  overlayStyle?: 'capsule' | 'vertical' | 'numeric';
+}
+
+function fillSettingsForm(values: SettingsFormValues) {
+  const {
+    thresholds,
+    notificationEnabled,
+    rangeMinutes,
+    preciseTempEnabled,
+    lhmBaseUrl,
+    overlayEnabled,
+    autostartEnabled,
+    overlayAutoHide,
+    overlayStyle,
+  } = values;
   const cpu = document.querySelector('#setting-cpu') as HTMLInputElement | null;
   const memory = document.querySelector('#setting-memory') as HTMLInputElement | null;
   const temp = document.querySelector('#setting-temp') as HTMLInputElement | null;
@@ -602,29 +625,50 @@ function readSettingsForm(): AlertThresholds | null {
   return thresholds;
 }
 
+interface AppliedSettings {
+  alert: AlertThresholds;
+  notificationEnabled: boolean;
+  historyRangeMinutes: number;
+  preciseTempEnabled: boolean;
+  lhmBaseUrl: string;
+  overlayEnabled: boolean;
+  autostartEnabled: boolean;
+  overlayAutoHide: boolean;
+  overlayStyle: string;
+}
+
 async function loadSettingsForm() {
   const cfg = await invoke<AppConfig>('get_app_config');
   historyRangeMinutes = normalizeHistoryRangeMinutes(cfg.historyRangeMinutes);
-  fillSettingsForm(
-    cfg.alert,
-    cfg.notificationEnabled,
-    historyRangeMinutes,
-    cfg.preciseTempEnabled,
-    cfg.lhmBaseUrl,
-    cfg.overlayEnabled,
-    cfg.autostartEnabled,
-    cfg.overlayAutoHide,
-    normalizeOverlayStyle(cfg.overlayStyle),
-  );
+  fillSettingsForm({
+    thresholds: cfg.alert,
+    notificationEnabled: cfg.notificationEnabled,
+    rangeMinutes: historyRangeMinutes,
+    preciseTempEnabled: cfg.preciseTempEnabled,
+    lhmBaseUrl: cfg.lhmBaseUrl,
+    overlayEnabled: cfg.overlayEnabled,
+    autostartEnabled: cfg.autostartEnabled,
+    overlayAutoHide: cfg.overlayAutoHide,
+    overlayStyle: normalizeOverlayStyle(cfg.overlayStyle),
+  });
   updateChartHint(historyRangeMinutes);
   await refreshTempSourceStatus();
 }
 
-async function applyHistoryRange(minutes: number): Promise<number> {
-  const saved = await invoke<number>('set_history_range_minutes', { minutes });
-  historyRangeMinutes = normalizeHistoryRangeMinutes(saved);
+function fillSettingsFormFromApplied(applied: AppliedSettings) {
+  historyRangeMinutes = normalizeHistoryRangeMinutes(applied.historyRangeMinutes);
   updateChartHint(historyRangeMinutes);
-  return historyRangeMinutes;
+  fillSettingsForm({
+    thresholds: applied.alert,
+    notificationEnabled: applied.notificationEnabled,
+    rangeMinutes: historyRangeMinutes,
+    preciseTempEnabled: applied.preciseTempEnabled,
+    lhmBaseUrl: applied.lhmBaseUrl,
+    overlayEnabled: applied.overlayEnabled,
+    autostartEnabled: applied.autostartEnabled,
+    overlayAutoHide: applied.overlayAutoHide,
+    overlayStyle: normalizeOverlayStyle(applied.overlayStyle),
+  });
 }
 
 async function setSettingsOpen(open: boolean) {
@@ -664,6 +708,7 @@ async function switchTab(tab: TabId) {
     }
   } else {
     await setSettingsOpen(false);
+    await refreshHistoryChart();
   }
 }
 
@@ -714,41 +759,20 @@ function bindSettingsUi() {
     if (resetBtn) resetBtn.disabled = true;
 
     try {
-      // 先校验并写入 LHM URL，失败则整次保存中止
-      const lhmBaseUrl = await invoke<string>('set_lhm_base_url', {
-        url: readLhmBaseUrl(),
+      const applied = await invoke<AppliedSettings>('apply_settings', {
+        settings: {
+          thresholds,
+          notificationEnabled: readNotificationEnabled(),
+          historyRangeMinutes: readHistoryRangeMinutes(),
+          preciseTempEnabled: readPreciseTempEnabled(),
+          lhmBaseUrl: readLhmBaseUrl(),
+          overlayEnabled: readOverlayEnabled(),
+          autostartEnabled: readAutostartEnabled(),
+          overlayAutoHide: readOverlayAutoHide(),
+          overlayStyle: readOverlayStyle(),
+        },
       });
-      const preciseTempEnabled = await invoke<boolean>('set_precise_temp_enabled', {
-        enabled: readPreciseTempEnabled(),
-      });
-      const saved = await invoke<AlertThresholds>('set_alert_thresholds', { thresholds });
-      const notificationEnabled = await invoke<boolean>('set_notification_enabled', {
-        enabled: readNotificationEnabled(),
-      });
-      const overlayEnabled = await invoke<boolean>('set_overlay_enabled', {
-        enabled: readOverlayEnabled(),
-      });
-      const autostartEnabled = await invoke<boolean>('set_autostart_enabled', {
-        enabled: readAutostartEnabled(),
-      });
-      const overlayAutoHide = await invoke<boolean>('set_overlay_auto_hide', {
-        enabled: readOverlayAutoHide(),
-      });
-      const overlayStyle = await invoke<string>('set_overlay_style', {
-        style: readOverlayStyle(),
-      });
-      const rangeMinutes = await applyHistoryRange(readHistoryRangeMinutes());
-      fillSettingsForm(
-        saved,
-        notificationEnabled,
-        rangeMinutes,
-        preciseTempEnabled,
-        lhmBaseUrl,
-        overlayEnabled,
-        autostartEnabled,
-        overlayAutoHide,
-        normalizeOverlayStyle(overlayStyle),
-      );
+      fillSettingsFormFromApplied(applied);
       await refreshTempSourceStatus();
       showSettingsMessage('已保存', 'ok');
     } catch (error) {
@@ -768,40 +792,8 @@ function bindSettingsUi() {
     if (resetBtn) resetBtn.disabled = true;
 
     try {
-      const restored = await invoke<AlertThresholds>('reset_alert_thresholds');
-      const notificationEnabled = await invoke<boolean>('set_notification_enabled', {
-        enabled: true,
-      });
-      const overlayEnabled = await invoke<boolean>('set_overlay_enabled', {
-        enabled: false,
-      });
-      const autostartEnabled = await invoke<boolean>('set_autostart_enabled', {
-        enabled: false,
-      });
-      const overlayAutoHide = await invoke<boolean>('set_overlay_auto_hide', {
-        enabled: false,
-      });
-      const overlayStyle = await invoke<string>('set_overlay_style', {
-        style: 'capsule',
-      });
-      const rangeMinutes = await applyHistoryRange(1);
-      const preciseTempEnabled = await invoke<boolean>('set_precise_temp_enabled', {
-        enabled: false,
-      });
-      const lhmBaseUrl = await invoke<string>('set_lhm_base_url', {
-        url: DEFAULT_LHM_BASE_URL,
-      });
-      fillSettingsForm(
-        restored,
-        notificationEnabled,
-        rangeMinutes,
-        preciseTempEnabled,
-        lhmBaseUrl,
-        overlayEnabled,
-        autostartEnabled,
-        overlayAutoHide,
-        normalizeOverlayStyle(overlayStyle),
-      );
+      const applied = await invoke<AppliedSettings>('apply_settings_reset');
+      fillSettingsFormFromApplied(applied);
       await refreshTempSourceStatus();
       showSettingsMessage('已恢复默认', 'ok');
     } catch (error) {
@@ -849,6 +841,7 @@ window.addEventListener('DOMContentLoaded', () => {
   void bootstrapHistoryHint();
   void ensureFrontendNotificationPermission();
   refreshMetrics();
+  // 主面板隐藏时继续轮询是告警链路所依赖的（前端采样驱动后端告警评估与通知），勿改为失焦暂停
   window.setInterval(refreshMetrics, 1000);
 
   void listen('open-settings', () => {

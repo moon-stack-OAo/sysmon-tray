@@ -598,6 +598,7 @@ body {
   font-weight: 600;
 }
 
+/* 反直觉写法：覆写 [hidden] 默认 display:none 为 grid，保住 grid-template-rows 0fr 折叠过渡动画，hidden 仅作语义标记 */
 .alert-banner[hidden] {
   display: grid;
 }
