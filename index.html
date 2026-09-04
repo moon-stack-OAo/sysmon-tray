@@ -69,6 +69,14 @@
           <div id="gpu-detail" class="metric-sub muted">需启用 LibreHardwareMonitor</div>
         </section>
 
+        <section id="fan-card" class="metric-card compact-card">
+          <div class="metric-top">
+            <span class="metric-label">风扇</span>
+            <span id="fan-summary" class="metric-value small">--</span>
+          </div>
+          <div id="fan-list" class="fan-list muted">需启用 LibreHardwareMonitor</div>
+        </section>
+
         <section id="swap-card" class="metric-card compact-card" hidden>
           <div class="metric-top">
             <span class="metric-label">Swap</span>
@@ -85,6 +93,7 @@
               <span class="legend-item cpu">CPU</span>
               <span class="legend-item mem">内存</span>
               <span class="legend-item temp" id="temp-legend">温度</span>
+              <span class="legend-item fan" id="fan-legend" hidden>风扇</span>
             </span>
           </div>
           <canvas id="history-chart" width="300" height="112"></canvas>
@@ -94,6 +103,7 @@
               <span class="cpu" id="chart-cpu-reading">CPU --</span>
               <span class="mem" id="chart-mem-reading">内存 --</span>
               <span class="temp" id="chart-temp-reading" hidden>温度 --</span>
+              <span class="fan" id="chart-fan-reading" hidden>风扇 --</span>
             </div>
           </div>
         </section>
@@ -242,7 +252,7 @@
 
             <section class="metric-card settings-card">
               <div class="metric-top">
-                <span class="section-title">精确温度 / GPU</span>
+                <span class="section-title">精确温度 / GPU / 风扇</span>
               </div>
               <div class="settings-group">
                 <label class="field switch-field">
@@ -269,7 +279,7 @@
                 <p class="settings-hint collapsible muted">
                   需本机运行 LibreHardwareMonitor 并开启 Remote Web
                   Server；本应用不捆绑驱动。CPU 温度失败时回退 ACPI/WMI；GPU
-                  占用/显存/温度仅来自 LHM，无独立回退。
+                  与风扇转速仅来自 LHM，无独立回退。
                 </p>
               </div>
             </section>

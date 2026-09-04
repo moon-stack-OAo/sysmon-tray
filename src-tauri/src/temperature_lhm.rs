@@ -1,5 +1,5 @@
 //! LibreHardwareMonitor Web Server 读取（探测本机 data.json，失败静默回退）。
-//! 同一次 HTTP 解析 CPU 温度与 GPU（占用 / 显存 / 温度）。
+//! 同一次 HTTP 解析 CPU 温度、GPU（占用 / 显存 / 温度）与风扇转速。
 
 use crate::temperature::{is_plausible_celsius, pick_cpu_temp, TemperatureProvider};
 use serde::Deserialize;
@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use ureq::Agent;
+
+const MAX_DISPLAY_FANS: usize = 4;
+const MAX_FAN_RPM: f32 = 20_000.0;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(150);
 const CIRCUIT_FAIL_THRESHOLD: u32 = 5;
@@ -123,11 +126,28 @@ pub struct GpuMetrics {
     pub temp_celsius: Option<f32>,
 }
 
-pub type SharedGpuCache = Arc<Mutex<Option<GpuMetrics>>>;
+/// 风扇转速（仅 LHM；无可靠低成本回退）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FanMetrics {
+    pub name: String,
+    pub rpm: u32,
+    /// `cpu` | `gpu` | `chassis` | `pump` | `other`
+    pub kind: String,
+}
+
+/// 同一次 LHM 请求解析出的 GPU / 风扇缓存。
+#[derive(Debug, Clone, Default)]
+pub struct LhmExtras {
+    pub gpu: Option<GpuMetrics>,
+    pub fans: Vec<FanMetrics>,
+}
+
+pub type SharedLhmExtras = Arc<Mutex<LhmExtras>>;
 
 pub struct LibreHardwareMonitorProvider {
     runtime: Arc<LhmRuntimeConfig>,
-    gpu_cache: SharedGpuCache,
+    lhm_extras: SharedLhmExtras,
     agent: Agent,
     consecutive_failures: u32,
     circuit_open_until: Option<Instant>,
@@ -135,7 +155,7 @@ pub struct LibreHardwareMonitorProvider {
 }
 
 impl LibreHardwareMonitorProvider {
-    pub fn new(runtime: Arc<LhmRuntimeConfig>, gpu_cache: SharedGpuCache) -> Self {
+    pub fn new(runtime: Arc<LhmRuntimeConfig>, lhm_extras: SharedLhmExtras) -> Self {
         let agent: Agent = Agent::config_builder()
             .timeout_global(Some(REQUEST_TIMEOUT))
             .http_status_as_error(true)
@@ -145,7 +165,7 @@ impl LibreHardwareMonitorProvider {
         let seen_epoch = runtime.epoch();
         Self {
             runtime,
-            gpu_cache,
+            lhm_extras,
             agent,
             consecutive_failures: 0,
             circuit_open_until: None,
@@ -184,15 +204,15 @@ impl LibreHardwareMonitorProvider {
         matches!(self.circuit_open_until, Some(until) if Instant::now() < until)
     }
 
-    fn clear_gpu_cache(&self) {
-        if let Ok(mut guard) = self.gpu_cache.lock() {
-            *guard = None;
+    fn clear_extras_cache(&self) {
+        if let Ok(mut guard) = self.lhm_extras.lock() {
+            *guard = LhmExtras::default();
         }
     }
 
-    fn store_gpu_cache(&self, gpu: Option<GpuMetrics>) {
-        if let Ok(mut guard) = self.gpu_cache.lock() {
-            *guard = gpu;
+    fn store_extras_cache(&self, extras: LhmExtras) {
+        if let Ok(mut guard) = self.lhm_extras.lock() {
+            *guard = extras;
         }
     }
 
@@ -208,12 +228,12 @@ impl TemperatureProvider for LibreHardwareMonitorProvider {
         self.sync_epoch();
 
         if !self.runtime.is_enabled() {
-            self.clear_gpu_cache();
+            self.clear_extras_cache();
             return None;
         }
 
         if self.circuit_blocked() {
-            self.clear_gpu_cache();
+            self.clear_extras_cache();
             return None;
         }
 
@@ -225,12 +245,15 @@ impl TemperatureProvider for LibreHardwareMonitorProvider {
         match self.fetch_and_parse(&url) {
             Some(parsed) => {
                 self.record_success();
-                self.store_gpu_cache(parsed.gpu);
+                self.store_extras_cache(LhmExtras {
+                    gpu: parsed.gpu,
+                    fans: parsed.fans,
+                });
                 parsed.cpu_temp
             }
             None => {
                 self.record_failure();
-                self.clear_gpu_cache();
+                self.clear_extras_cache();
                 None
             }
         }
@@ -241,6 +264,7 @@ impl TemperatureProvider for LibreHardwareMonitorProvider {
 struct LhmParseResult {
     cpu_temp: Option<f32>,
     gpu: Option<GpuMetrics>,
+    fans: Vec<FanMetrics>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -263,7 +287,12 @@ fn extract_lhm_metrics(root: &Value) -> LhmParseResult {
         collect_temp_readings(&node, &mut temp_readings);
         let cpu_temp = pick_cpu_temp(&temp_readings);
         let gpu = pick_primary_gpu(collect_gpu_candidates(&node));
-        return LhmParseResult { cpu_temp, gpu };
+        let fans = pick_display_fans(collect_fan_candidates(&node));
+        return LhmParseResult {
+            cpu_temp,
+            gpu,
+            fans,
+        };
     }
 
     let mut temp_readings = Vec::new();
@@ -271,6 +300,7 @@ fn extract_lhm_metrics(root: &Value) -> LhmParseResult {
     LhmParseResult {
         cpu_temp: pick_cpu_temp(&temp_readings),
         gpu: None,
+        fans: Vec::new(),
     }
 }
 
@@ -554,6 +584,209 @@ fn pick_primary_gpu(mut candidates: Vec<GpuCandidate>) -> Option<GpuMetrics> {
     })
 }
 
+#[derive(Debug, Clone)]
+struct FanCandidate {
+    name: String,
+    rpm: u32,
+    kind: &'static str,
+    score: i32,
+}
+
+fn is_plausible_fan_rpm(rpm: f32) -> bool {
+    rpm.is_finite() && rpm > 0.0 && rpm <= MAX_FAN_RPM
+}
+
+fn fan_kind_and_score(name: &str, ancestor: &str) -> (&'static str, i32) {
+    let combined = format!("{ancestor} {name}").to_ascii_lowercase();
+    if combined.contains("pump") || combined.contains("水泵") || combined.contains("aio") {
+        return ("pump", 90);
+    }
+    if combined.contains("cpu") || combined.contains("processor") || combined.contains("cpu fan") {
+        return ("cpu", 100);
+    }
+    if combined.contains("gpu")
+        || combined.contains("nvidia")
+        || combined.contains("radeon")
+        || combined.contains("geforce")
+        || combined.contains("graphics")
+    {
+        return ("gpu", 80);
+    }
+    if combined.contains("chassis")
+        || combined.contains("case")
+        || combined.contains("system")
+        || combined.contains("机箱")
+        || combined.contains("sys fan")
+        || combined.contains("fan #")
+        || combined.contains("fan1")
+        || combined.contains("fan 1")
+        || combined.contains("fan2")
+        || combined.contains("fan 2")
+        || combined.contains("fan3")
+        || combined.contains("fan 3")
+    {
+        return ("chassis", 60);
+    }
+    ("other", 20)
+}
+
+fn display_fan_label(kind: &str, raw_name: &str) -> String {
+    let trimmed = raw_name.trim();
+    match kind {
+        "cpu" => {
+            if trimmed.to_ascii_lowercase().contains("cpu") {
+                trimmed.to_string()
+            } else {
+                format!("CPU {trimmed}")
+            }
+        }
+        "gpu" => {
+            if trimmed.to_ascii_lowercase().contains("gpu") {
+                trimmed.to_string()
+            } else {
+                format!("GPU {trimmed}")
+            }
+        }
+        "chassis" => {
+            let lower = trimmed.to_ascii_lowercase();
+            if lower.contains("chassis")
+                || lower.contains("case")
+                || lower.contains("system")
+                || trimmed.contains("机箱")
+            {
+                trimmed.to_string()
+            } else {
+                format!("机箱 {trimmed}")
+            }
+        }
+        "pump" => {
+            if trimmed.to_ascii_lowercase().contains("pump") || trimmed.contains("水泵") {
+                trimmed.to_string()
+            } else {
+                format!("水泵 {trimmed}")
+            }
+        }
+        _ => trimmed.to_string(),
+    }
+}
+
+fn collect_fan_candidates(root: &LhmNode) -> Vec<FanCandidate> {
+    let mut out = Vec::new();
+    walk_for_fans(root, "", &mut out);
+    out
+}
+
+fn walk_for_fans(node: &LhmNode, ancestor: &str, out: &mut Vec<FanCandidate>) {
+    let text = node.text.as_deref().unwrap_or("").trim();
+    let next_ancestor = if text.is_empty() {
+        ancestor.to_string()
+    } else if ancestor.is_empty() {
+        text.to_string()
+    } else {
+        format!("{ancestor} / {text}")
+    };
+
+    if let Some(candidate) = parse_fan_sensor(node, ancestor) {
+        out.push(candidate);
+    }
+
+    if let Some(children) = &node.children {
+        for child in children {
+            walk_for_fans(child, &next_ancestor, out);
+        }
+    }
+}
+
+fn parse_fan_sensor(node: &LhmNode, ancestor: &str) -> Option<FanCandidate> {
+    let text = node.text.as_deref()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let sensor_type = node.sensor_type.as_deref().unwrap_or("");
+    let value_raw = node.value.as_deref().unwrap_or("");
+    let lower_text = text.to_ascii_lowercase();
+    let lower_value = value_raw.to_ascii_lowercase();
+
+    let is_fan_type = sensor_type.eq_ignore_ascii_case("Fan");
+    let name_looks_fan = lower_text.contains("fan")
+        || lower_text.contains("风扇")
+        || lower_text.contains("pump")
+        || lower_text.contains("水泵");
+    let value_looks_rpm = lower_value.contains("rpm")
+        || (sensor_type.is_empty() && name_looks_fan && parse_lhm_number(value_raw).is_some());
+
+    if !is_fan_type && !(name_looks_fan && value_looks_rpm) {
+        return None;
+    }
+
+    let rpm_f = parse_lhm_number(value_raw).filter(|v| is_plausible_fan_rpm(*v))?;
+    let rpm = rpm_f.round() as u32;
+    if rpm == 0 {
+        return None;
+    }
+
+    let (kind, score) = fan_kind_and_score(text, ancestor);
+    Some(FanCandidate {
+        name: display_fan_label(kind, text),
+        rpm,
+        kind,
+        score,
+    })
+}
+
+fn pick_display_fans(mut candidates: Vec<FanCandidate>) -> Vec<FanMetrics> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    candidates.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| b.rpm.cmp(&a.rpm))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    let mut selected: Vec<FanMetrics> = Vec::new();
+    let mut seen_kinds: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+    // 先各 kind 取一条（CPU / GPU / 机箱 / 水泵优先）
+    for c in &candidates {
+        if selected.len() >= MAX_DISPLAY_FANS {
+            break;
+        }
+        if c.kind == "other" {
+            continue;
+        }
+        if !seen_kinds.insert(c.kind) {
+            continue;
+        }
+        selected.push(FanMetrics {
+            name: c.name.clone(),
+            rpm: c.rpm,
+            kind: c.kind.to_string(),
+        });
+    }
+
+    // 槽位未满时再补同 kind 的次优扇
+    if selected.len() < MAX_DISPLAY_FANS {
+        for c in &candidates {
+            if selected.len() >= MAX_DISPLAY_FANS {
+                break;
+            }
+            if selected.iter().any(|s| s.name == c.name && s.rpm == c.rpm) {
+                continue;
+            }
+            selected.push(FanMetrics {
+                name: c.name.clone(),
+                rpm: c.rpm,
+                kind: c.kind.to_string(),
+            });
+        }
+    }
+
+    selected
+}
+
 /// 解析 LHM 数值字符串，如 `"46.9 °C"` / `"12.9 %"` / `"1593"`。
 fn parse_lhm_number(raw: &str) -> Option<f32> {
     let trimmed = raw.trim();
@@ -615,5 +848,62 @@ mod tests {
         assert_eq!(gpu.temp_celsius, Some(53.0));
         assert!(gpu.memory_total_bytes.unwrap() > 0);
         assert!(gpu.memory_percent.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn extract_fans_from_sample_tree() {
+        let json = r#"{
+          "Text": "Computer",
+          "Children": [
+            {
+              "Text": "Nuvoton NCT6798D",
+              "Children": [
+                { "Text": "CPU Fan", "Value": "2450 RPM", "Type": "Fan", "Children": [] },
+                { "Text": "Pump", "Value": "3200 RPM", "Type": "Fan", "Children": [] },
+                { "Text": "System Fan #1", "Value": "980 RPM", "Type": "Fan", "Children": [] },
+                { "Text": "System Fan #2", "Value": "1100 RPM", "Type": "Fan", "Children": [] },
+                { "Text": "Fan #3", "Value": "0 RPM", "Type": "Fan", "Children": [] },
+                { "Text": "Noise", "Value": "32.0 dB(A)", "Type": "Noise", "Children": [] }
+              ]
+            },
+            {
+              "Text": "NVIDIA GeForce RTX 3080",
+              "ImageURL": "images_icon/nvidia.png",
+              "Children": [
+                { "Text": "GPU Fan", "Value": "1800 RPM", "Type": "Fan", "Children": [] },
+                { "Text": "GPU Core", "Value": "45.0 %", "Type": "Load", "Children": [] }
+              ]
+            }
+          ]
+        }"#;
+        let root: Value = serde_json::from_str(json).unwrap();
+        let parsed = extract_lhm_metrics(&root);
+        assert!(!parsed.fans.is_empty());
+        assert!(parsed.fans.len() <= 4);
+        assert!(parsed.fans.iter().all(|f| f.rpm > 0));
+        assert!(parsed.fans.iter().any(|f| f.kind == "cpu"));
+        assert!(parsed.fans.iter().any(|f| f.kind == "gpu" || f.kind == "pump"));
+        assert!(!parsed.fans.iter().any(|f| f.rpm == 0));
+    }
+
+    #[test]
+    fn fan_name_heuristic_without_type() {
+        let json = r#"{
+          "Text": "Computer",
+          "Children": [
+            {
+              "Text": "SuperIO",
+              "Children": [
+                { "Text": "Chassis Fan", "Value": "900 RPM", "Children": [] },
+                { "Text": "CPU", "Value": "55.0 °C", "Type": "Temperature", "Children": [] }
+              ]
+            }
+          ]
+        }"#;
+        let root: Value = serde_json::from_str(json).unwrap();
+        let parsed = extract_lhm_metrics(&root);
+        assert_eq!(parsed.fans.len(), 1);
+        assert_eq!(parsed.fans[0].kind, "chassis");
+        assert_eq!(parsed.fans[0].rpm, 900);
     }
 }

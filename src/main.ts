@@ -75,6 +75,12 @@ interface GpuMetrics {
   tempCelsius: number | null;
 }
 
+interface FanMetrics {
+  name: string;
+  rpm: number;
+  kind: string;
+}
+
 interface Metrics {
   cpuPercent: number;
   memoryUsedBytes: number;
@@ -87,6 +93,7 @@ interface Metrics {
   disks: DiskStat[];
   cpuTempCelsius: number | null;
   gpu: GpuMetrics | null;
+  fans: FanMetrics[];
   sampledAtMs: number;
   alert: AlertStatus;
   tempSource: string;
@@ -96,6 +103,8 @@ interface HistoryPoint {
   cpuPercent: number;
   memoryPercent: number;
   cpuTempCelsius: number | null;
+  fanRpm: number | null;
+  fanName: string | null;
   timestampMs: number;
 }
 
@@ -186,6 +195,49 @@ function renderDiskList(
     if (subEl) {
       subEl.textContent = `${formatBytes(used)} / ${formatBytes(disk.totalBytes)} · ${disk.usedPercent.toFixed(1)}%`;
     }
+  }
+}
+
+function fanKindLabel(kind: string): string {
+  switch (kind) {
+    case 'cpu':
+      return 'CPU';
+    case 'gpu':
+      return 'GPU';
+    case 'chassis':
+      return '机箱';
+    case 'pump':
+      return '水泵';
+    default:
+      return '风扇';
+  }
+}
+
+function formatFanSummary(fans: FanMetrics[]): string {
+  if (!fans.length) return '--';
+  const primary = fans[0];
+  return `${fanKindLabel(primary.kind)} ${primary.rpm}`;
+}
+
+function renderFanList(fanList: HTMLElement, fans: FanMetrics[], tempSource: string) {
+  if (!fans.length) {
+    fanList.textContent =
+      tempSource === 'lhm' ? '暂不可用' : '需启用 LibreHardwareMonitor';
+    return;
+  }
+
+  fanList.textContent = '';
+  for (const fan of fans.slice(0, 4)) {
+    const item = document.createElement('div');
+    item.className = 'fan-item';
+    const name = document.createElement('span');
+    name.className = 'fan-name';
+    name.textContent = fan.name;
+    const rpm = document.createElement('span');
+    rpm.className = 'fan-rpm';
+    rpm.textContent = `${fan.rpm} RPM`;
+    item.append(name, rpm);
+    fanList.appendChild(item);
   }
 }
 
@@ -311,10 +363,11 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-function updateChartReadings(point: HistoryPoint | null, hasTemp: boolean) {
+function updateChartReadings(point: HistoryPoint | null, hasTemp: boolean, hasFan: boolean) {
   const cpuReading = document.querySelector('#chart-cpu-reading');
   const memReading = document.querySelector('#chart-mem-reading');
   const tempReading = document.querySelector('#chart-temp-reading') as HTMLElement | null;
+  const fanReading = document.querySelector('#chart-fan-reading') as HTMLElement | null;
 
   if (cpuReading) {
     cpuReading.textContent = point != null ? `CPU ${point.cpuPercent.toFixed(1)}%` : 'CPU --';
@@ -331,11 +384,22 @@ function updateChartReadings(point: HistoryPoint | null, hasTemp: boolean) {
       tempReading.textContent = '温度 --';
     }
   }
+  if (fanReading) {
+    if (hasFan && point?.fanRpm != null) {
+      fanReading.hidden = false;
+      const label = point.fanName?.trim() || '风扇';
+      fanReading.textContent = `${label} ${point.fanRpm}`;
+    } else {
+      fanReading.hidden = true;
+      fanReading.textContent = '风扇 --';
+    }
+  }
 }
 
 function drawHistoryChart(points: HistoryPoint[]) {
   const canvas = document.querySelector('#history-chart') as HTMLCanvasElement | null;
   const tempLegend = document.querySelector('#temp-legend') as HTMLElement | null;
+  const fanLegend = document.querySelector('#fan-legend') as HTMLElement | null;
   if (!canvas) return;
 
   const dpr = window.devicePixelRatio || 1;
@@ -371,7 +435,8 @@ function drawHistoryChart(points: HistoryPoint[]) {
     ctx.font = '12px Inter, Segoe UI, Microsoft YaHei, sans-serif';
     ctx.fillText('采集中…', 10, cssHeight / 2 + 4);
     if (tempLegend) tempLegend.hidden = true;
-    updateChartReadings(null, false);
+    if (fanLegend) fanLegend.hidden = true;
+    updateChartReadings(null, false, false);
     return;
   }
 
@@ -383,12 +448,25 @@ function drawHistoryChart(points: HistoryPoint[]) {
   const stepX = plotW / Math.max(n - 1, 1);
 
   const hasTemp = drawPoints.some((p) => p.cpuTempCelsius != null);
+  const hasFan = drawPoints.some((p) => p.fanRpm != null);
   if (tempLegend) tempLegend.hidden = !hasTemp;
+  if (fanLegend) {
+    fanLegend.hidden = !hasFan;
+    if (hasFan) {
+      const latestName = [...drawPoints]
+        .reverse()
+        .find((p) => p.fanName != null && p.fanName.trim())?.fanName;
+      fanLegend.textContent = latestName?.trim() || '风扇';
+    }
+  }
 
   const hint = document.querySelector('#chart-hint');
   if (hint) {
     const base = `最近约 ${normalizeHistoryRangeMinutes(historyRangeMinutes)} 分钟`;
-    hint.textContent = hasTemp ? `${base} · 温度独立轴` : base;
+    const axes: string[] = [];
+    if (hasTemp) axes.push('温度');
+    if (hasFan) axes.push('转速');
+    hint.textContent = axes.length ? `${base} · ${axes.join('/')}独立轴` : base;
   }
 
   const tempValues = drawPoints.map((p) => p.cpuTempCelsius).filter((v): v is number => v != null);
@@ -396,9 +474,16 @@ function drawHistoryChart(points: HistoryPoint[]) {
   const tempMax = hasTemp ? Math.max(...tempValues, 90) : 100;
   const tempRange = Math.max(tempMax - tempMin, 1);
 
+  const fanValues = drawPoints.map((p) => p.fanRpm).filter((v): v is number => v != null);
+  const fanMin = hasFan ? Math.min(...fanValues, 0) : 0;
+  const fanMax = hasFan ? Math.max(...fanValues, 1000) : 1000;
+  const fanRange = Math.max(fanMax - fanMin, 1);
+
   const yPercent = (v: number): number => padY + plotH * (1 - Math.max(0, Math.min(100, v)) / 100);
 
   const yTemp = (v: number): number => padY + plotH * (1 - (v - tempMin) / tempRange);
+
+  const yFan = (v: number): number => padY + plotH * (1 - (v - fanMin) / fanRange);
 
   const drawSeries = (values: Array<number | null>, color: string, mapY: (v: number) => number) => {
     const segments: Array<Array<{ x: number; y: number }>> = [];
@@ -474,8 +559,15 @@ function drawHistoryChart(points: HistoryPoint[]) {
       yTemp,
     );
   }
+  if (hasFan) {
+    drawSeries(
+      drawPoints.map((p) => p.fanRpm),
+      '#c084fc',
+      yFan,
+    );
+  }
 
-  updateChartReadings(drawPoints[drawPoints.length - 1] ?? null, hasTemp);
+  updateChartReadings(drawPoints[drawPoints.length - 1] ?? null, hasTemp, hasFan);
 }
 
 async function refreshHistoryChart() {
@@ -585,6 +677,14 @@ async function refreshMetrics() {
             ? '暂不可用'
             : '需启用 LibreHardwareMonitor';
       }
+    }
+
+    const fans = metrics.fans ?? [];
+    const fanSummary = document.querySelector('#fan-summary');
+    const fanList = document.querySelector('#fan-list');
+    if (fanSummary) fanSummary.textContent = formatFanSummary(fans);
+    if (fanList) {
+      renderFanList(fanList as HTMLElement, fans, metrics.tempSource);
     }
 
     if (netDown) netDown.textContent = formatSpeed(metrics.netDownBps);

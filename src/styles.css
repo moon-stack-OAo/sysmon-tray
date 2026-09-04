@@ -64,6 +64,7 @@
   --chart-cpu: var(--accent);
   --chart-mem: var(--success);
   --chart-temp: var(--temp);
+  --chart-fan: #c084fc;
 
   --glass-bg: var(--glass);
   --glass-card: var(--surface);
@@ -745,6 +746,34 @@ body {
   gap: 6px;
 }
 
+.fan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+}
+
+.fan-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.fan-item .fan-name {
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fan-item .fan-rpm {
+  color: var(--meta);
+  font-variant-numeric: tabular-nums;
+}
+
 .process-top-hint {
   font-size: var(--text-xs);
 }
@@ -843,7 +872,12 @@ body {
   background: var(--chart-temp);
 }
 
-.legend-item.temp[hidden] {
+.legend-item.fan::before {
+  background: var(--chart-fan);
+}
+
+.legend-item.temp[hidden],
+.legend-item.fan[hidden] {
   display: none;
 }
 
@@ -880,6 +914,11 @@ body {
   color: var(--chart-temp);
 }
 
-.chart-readings .temp[hidden] {
+.chart-readings .fan {
+  color: var(--chart-fan);
+}
+
+.chart-readings .temp[hidden],
+.chart-readings .fan[hidden] {
   display: none;
 }

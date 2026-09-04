@@ -19,6 +19,12 @@ interface GpuMetrics {
   tempCelsius: number | null;
 }
 
+interface FanMetrics {
+  name: string;
+  rpm: number;
+  kind: string;
+}
+
 interface Metrics {
   cpuPercent: number;
   memoryPercent: number;
@@ -28,6 +34,7 @@ interface Metrics {
   netUpBps: number;
   cpuTempCelsius: number | null;
   gpu: GpuMetrics | null;
+  fans: FanMetrics[];
   sampledAtMs: number;
   alert: AlertStatus;
   tempSource: string;
@@ -192,6 +199,40 @@ function gpuLevelPercent(gpu: GpuMetrics | null): number {
   return tempPercent(gpu.tempCelsius);
 }
 
+function fanKindShort(kind: string): string {
+  switch (kind) {
+    case 'cpu':
+      return 'CPU';
+    case 'gpu':
+      return 'GPU';
+    case 'chassis':
+      return '机箱';
+    case 'pump':
+      return '泵';
+    default:
+      return '风扇';
+  }
+}
+
+function formatFansExpanded(fans: FanMetrics[], tempSource: string): {
+  primary: string;
+  detail: string;
+} {
+  if (!fans.length) {
+    return {
+      primary: '--',
+      detail: tempSource === 'lhm' ? '暂不可用' : '需启用 LibreHardwareMonitor',
+    };
+  }
+  const primary = fans[0];
+  const primaryText = `${fanKindShort(primary.kind)} ${primary.rpm}`;
+  const detail = fans
+    .slice(0, 3)
+    .map((f) => `${fanKindShort(f.kind)} ${f.rpm}`)
+    .join(' · ');
+  return { primary: primaryText, detail };
+}
+
 function applyStyleClass(next: OverlayStyle) {
   const root = document.querySelector('#overlay-root');
   if (!root) return;
@@ -352,6 +393,10 @@ function updateExpandedPanel(metrics: Metrics) {
       metrics.tempSource === 'lhm' ? '暂不可用' : '需启用 LibreHardwareMonitor',
     );
   }
+
+  const fanView = formatFansExpanded(metrics.fans ?? [], metrics.tempSource);
+  setText('ov-fan', fanView.primary);
+  setText('ov-fan-detail', fanView.detail);
 
   setFill(
     document.querySelector('#ov-cpu-bar') as HTMLElement | null,

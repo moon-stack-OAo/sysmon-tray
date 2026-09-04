@@ -1,6 +1,6 @@
 use crate::history::MetricsHistory;
 use crate::temperature::{ChainedTemperatureProvider, TemperatureProvider};
-use crate::temperature_lhm::{GpuMetrics, SharedGpuCache};
+use crate::temperature_lhm::{FanMetrics, GpuMetrics, SharedLhmExtras};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -43,6 +43,8 @@ pub struct Metrics {
     pub cpu_temp_celsius: Option<f32>,
     /// 仅 LHM 可用；无可靠低成本回退时为 None
     pub gpu: Option<GpuMetrics>,
+    /// 仅 LHM 可用；无数据时为空列表
+    pub fans: Vec<FanMetrics>,
     pub sampled_at_ms: u128,
 }
 
@@ -253,6 +255,11 @@ impl MonitorState {
 
         let last_temp = self.last_metrics.as_ref().and_then(|m| m.cpu_temp_celsius);
         let last_gpu = self.last_metrics.as_ref().and_then(|m| m.gpu.clone());
+        let last_fans = self
+            .last_metrics
+            .as_ref()
+            .map(|m| m.fans.clone())
+            .unwrap_or_default();
 
         let metrics = Metrics {
             cpu_percent: self.system.global_cpu_usage(),
@@ -266,6 +273,7 @@ impl MonitorState {
             disks,
             cpu_temp_celsius: last_temp,
             gpu: last_gpu,
+            fans: last_fans,
             sampled_at_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis())
@@ -308,11 +316,11 @@ pub type SharedTemperature = Mutex<ChainedTemperatureProvider>;
 /// 主面板与叠加层共用的采样入口：距上次真实采样不足 `min_interval` 返回缓存。
 /// 真实采样时锁内完成 sysinfo 采样与网速差分，释放锁后再读温度（LHM/WMI IO
 /// 最长可达数百毫秒），避免阻塞 get_metrics_history 等共享读者。
-/// GPU 随 LHM 同一次请求写入 gpu_cache，在此回填到 Metrics。
+/// GPU / 风扇随 LHM 同一次请求写入 lhm_extras，在此回填到 Metrics。
 pub fn sample_cached_shared(
     monitor: &SharedMonitor,
     temperature: &SharedTemperature,
-    gpu_cache: &SharedGpuCache,
+    lhm_extras: &SharedLhmExtras,
     min_interval: Duration,
 ) -> Result<Metrics, String> {
     let (mut metrics, needs_temp) = {
@@ -331,10 +339,9 @@ pub fn sample_cached_shared(
             provider.read_cpu_temp_celsius()
         };
         metrics.cpu_temp_celsius = temp;
-        metrics.gpu = gpu_cache
-            .lock()
-            .map_err(|e| e.to_string())?
-            .clone();
+        let extras = lhm_extras.lock().map_err(|e| e.to_string())?.clone();
+        metrics.gpu = extras.gpu;
+        metrics.fans = extras.fans;
 
         let mut state = monitor.lock().map_err(|e| e.to_string())?;
         state.complete_sample(metrics.clone());

@@ -1,4 +1,5 @@
 use crate::monitor::Metrics;
+use crate::temperature_lhm::FanMetrics;
 use serde::Serialize;
 use std::collections::VecDeque;
 
@@ -14,6 +15,8 @@ pub struct HistoryPoint {
     pub cpu_percent: f32,
     pub memory_percent: f32,
     pub cpu_temp_celsius: Option<f32>,
+    pub fan_rpm: Option<u32>,
+    pub fan_name: Option<String>,
     pub timestamp_ms: u128,
 }
 
@@ -48,10 +51,13 @@ impl MetricsHistory {
         if self.points.len() >= self.capacity {
             self.points.pop_front();
         }
+        let primary = pick_primary_fan(&metrics.fans);
         self.points.push_back(HistoryPoint {
             cpu_percent: metrics.cpu_percent,
             memory_percent: metrics.memory_percent,
             cpu_temp_celsius: metrics.cpu_temp_celsius,
+            fan_rpm: primary.map(|f| f.rpm),
+            fan_name: primary.map(|f| f.name.clone()),
             timestamp_ms: metrics.sampled_at_ms,
         });
     }
@@ -59,6 +65,17 @@ impl MetricsHistory {
     pub fn snapshot(&self) -> Vec<HistoryPoint> {
         self.points.iter().cloned().collect()
     }
+}
+
+/// 主风扇：CPU → 泵 → GPU → 机箱 → 其余第一条
+fn pick_primary_fan(fans: &[FanMetrics]) -> Option<&FanMetrics> {
+    const ORDER: &[&str] = &["cpu", "pump", "gpu", "chassis"];
+    for kind in ORDER {
+        if let Some(fan) = fans.iter().find(|f| f.kind == *kind) {
+            return Some(fan);
+        }
+    }
+    fans.first()
 }
 
 /// 按分钟换算容量（约 1 秒采样一次）
@@ -75,5 +92,33 @@ pub fn normalize_history_range_minutes(minutes: u32) -> u32 {
         minutes
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_primary_fan;
+    use crate::temperature_lhm::FanMetrics;
+
+    fn fan(kind: &str, rpm: u32) -> FanMetrics {
+        FanMetrics {
+            name: format!("{kind}-fan"),
+            rpm,
+            kind: kind.to_string(),
+        }
+    }
+
+    #[test]
+    fn pick_primary_prefers_cpu_then_pump_gpu_chassis() {
+        let fans = vec![fan("chassis", 800), fan("gpu", 1200), fan("pump", 2000)];
+        assert_eq!(pick_primary_fan(&fans).map(|f| f.kind.as_str()), Some("pump"));
+
+        let fans = vec![fan("chassis", 800), fan("cpu", 1500), fan("gpu", 1200)];
+        assert_eq!(pick_primary_fan(&fans).map(|f| f.kind.as_str()), Some("cpu"));
+
+        let fans = vec![fan("other", 500)];
+        assert_eq!(pick_primary_fan(&fans).map(|f| f.rpm), Some(500));
+
+        assert!(pick_primary_fan(&[]).is_none());
     }
 }

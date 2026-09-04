@@ -26,7 +26,7 @@ use tauri::{
 };
 use tauri_plugin_notification::NotificationExt;
 use temperature::ChainedTemperatureProvider;
-use temperature_lhm::{LhmRuntimeConfig, SharedGpuCache, TempSourceKind, TempSourceTracker};
+use temperature_lhm::{LhmExtras, LhmRuntimeConfig, SharedLhmExtras, TempSourceKind, TempSourceTracker};
 
 pub type SharedSettingsOpen = Mutex<bool>;
 pub type SharedLhmRuntime = Arc<LhmRuntimeConfig>;
@@ -50,7 +50,7 @@ const OVERLAY_VERTICAL_HEIGHT: u32 = 200;
 const OVERLAY_NUMERIC_WIDTH: u32 = 246;
 const OVERLAY_NUMERIC_HEIGHT: u32 = 34;
 const OVERLAY_EXPANDED_WIDTH: u32 = 310;
-const OVERLAY_EXPANDED_HEIGHT: u32 = 252;
+const OVERLAY_EXPANDED_HEIGHT: u32 = 278;
 const OVERLAY_PEEK_THICKNESS: u32 = 8;
 const OVERLAY_PEEK_LENGTH: u32 = 96;
 
@@ -126,10 +126,10 @@ fn temp_source_message(
     }
 
     match kind {
-        TempSourceKind::Lhm => "已连接 LibreHardwareMonitor（含 GPU）".to_string(),
-        TempSourceKind::Wmi => "未检测到 LHM · 已回退 ACPI/WMI（GPU 需 LHM）".to_string(),
-        TempSourceKind::Sysinfo => "未检测到 LHM · 已回退 sysinfo（GPU 需 LHM）".to_string(),
-        TempSourceKind::Unavailable => "未检测到 LHM · 温度/GPU 暂不可用".to_string(),
+        TempSourceKind::Lhm => "已连接 LibreHardwareMonitor（含 GPU / 风扇）".to_string(),
+        TempSourceKind::Wmi => "未检测到 LHM · 已回退 ACPI/WMI（GPU / 风扇需 LHM）".to_string(),
+        TempSourceKind::Sysinfo => "未检测到 LHM · 已回退 sysinfo（GPU / 风扇需 LHM）".to_string(),
+        TempSourceKind::Unavailable => "未检测到 LHM · 温度/GPU/风扇暂不可用".to_string(),
     }
 }
 
@@ -138,7 +138,7 @@ fn get_metrics(
     app: tauri::AppHandle,
     monitor: tauri::State<'_, SharedMonitor>,
     temperature: tauri::State<'_, SharedTemperature>,
-    gpu_cache: tauri::State<'_, SharedGpuCache>,
+    lhm_extras: tauri::State<'_, SharedLhmExtras>,
     alerts: tauri::State<'_, SharedAlerts>,
     config: tauri::State<'_, SharedConfig>,
     tracker: tauri::State<'_, SharedTempTracker>,
@@ -147,7 +147,7 @@ fn get_metrics(
     let metrics = sample_cached_shared(
         &monitor,
         &temperature,
-        &gpu_cache,
+        &lhm_extras,
         METRICS_CACHE_MIN_INTERVAL,
     )?;
 
@@ -1285,11 +1285,11 @@ pub fn run() {
         initial_config.lhm_base_url.clone(),
     );
     let temp_tracker = TempSourceTracker::new();
-    let gpu_cache: SharedGpuCache = Arc::new(Mutex::new(None));
+    let lhm_extras: SharedLhmExtras = Arc::new(Mutex::new(LhmExtras::default()));
     let temperature_provider = ChainedTemperatureProvider::platform_default(
         Arc::clone(&lhm_runtime),
         Arc::clone(&temp_tracker),
-        Arc::clone(&gpu_cache),
+        Arc::clone(&lhm_extras),
     );
 
     tauri::Builder::default()
@@ -1315,7 +1315,7 @@ pub fn run() {
         .manage(SharedMainLastMove(Mutex::new(None)))
         .manage(lhm_runtime as SharedLhmRuntime)
         .manage(temp_tracker as SharedTempTracker)
-        .manage(gpu_cache)
+        .manage(lhm_extras)
         .invoke_handler(tauri::generate_handler![
             get_metrics,
             get_metrics_history,
