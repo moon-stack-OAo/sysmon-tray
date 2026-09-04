@@ -291,12 +291,6 @@ body {
   gap: 0;
 }
 
-.vertical-strip .icon-btn {
-  margin-left: 0;
-  margin-top: auto;
-  align-self: center;
-}
-
 .strip {
   display: flex;
   align-items: center;
@@ -337,6 +331,10 @@ body {
   flex-shrink: 1;
   min-width: 0;
   padding: 0 1px;
+}
+
+.strip-metric[data-metric='gpu'] {
+  flex-shrink: 0;
 }
 
 .strip-metric.alert .strip-v {
@@ -513,6 +511,16 @@ body {
 
 .meter-value.sm {
   font-size: 12px;
+}
+
+.meter-detail {
+  color: var(--meta);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .meter-track {

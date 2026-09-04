@@ -6,6 +6,26 @@
 
 ## [Unreleased]
 
+## [0.1.2]
+
+### 新增
+
+- Swap 占用展示：主面板紧凑卡与叠加层展开态；无交换分区时隐藏
+- 磁盘占用告警：`diskPercent` 默认 90%，文案含挂载点
+- 进程 Top 5：设置项 `processTopEnabled`（默认关闭），约 4 秒降频，按进程名合并
+- GPU 占用 / 显存 / 温度：启用 LibreHardwareMonitor 时从同一 `data.json` 解析主 GPU；无 LHM 时显示依赖说明（无独立回退）
+- 主面板 GPU 卡片；叠加层胶囊 / 数值 / 竖条 / 展开态展示 GPU
+
+### 变更
+
+- 叠加层尺寸：胶囊宽 378、数值条宽 246、竖条约 76×200、展开高 252
+- 胶囊 / 数值收起态 GPU 仅显示占用%；竖条合并为单行；竖条去掉展开按钮（仍可双击展开）
+
+### 说明
+
+- GPU 复用「精确温度」开关与 LHM 地址，不另增开关
+- 暂未加入 GPU 告警阈值与历史曲线
+
 ## [0.1.1]
 
 ### 新增
@@ -49,6 +69,7 @@
 - NSIS 安装界面支持中英双语选择
 - Release 资源英文命名：`sysmon-tray_*_x64-setup.exe`
 
-[Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/moon-stack-OAo/sysmon-tray/releases/tag/v0.1.0

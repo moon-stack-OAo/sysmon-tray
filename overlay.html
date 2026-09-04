@@ -35,6 +35,13 @@
         </span>
         <span class="strip-sep" data-tauri-drag-region></span>
 
+        <span class="strip-metric" data-metric="gpu" data-tauri-drag-region>
+          <span class="strip-dot" id="strip-gpu-dot"></span>
+          <span class="strip-k">GPU</span>
+          <span id="strip-gpu" class="strip-v">--</span>
+        </span>
+        <span class="strip-sep" data-tauri-drag-region></span>
+
         <span class="strip-metric strip-net" data-tauri-drag-region>
           <span class="strip-k accent">↓</span>
           <span id="strip-net-down" class="strip-v">--</span>
@@ -53,6 +60,8 @@
         <span id="num-mem" class="num-v">--</span>
         <span class="num-sep">/</span>
         <span id="num-temp" class="num-v">--</span>
+        <span class="num-sep">/</span>
+        <span id="num-gpu" class="num-v" title="GPU 占用%">--</span>
         <span class="num-sep">·</span>
         <span id="num-net" class="num-v net">↓-- ↑--</span>
         <button type="button" id="btn-expand-num" class="icon-btn" title="展开" aria-label="展开">
@@ -73,14 +82,15 @@
           <span class="v-k">温度</span>
           <span id="v-temp" class="v-v">--</span>
         </div>
+        <div class="v-item" data-metric="gpu" data-tauri-drag-region>
+          <span class="v-k">GPU</span>
+          <span id="v-gpu" class="v-v sm">--</span>
+        </div>
         <div class="v-item net" data-tauri-drag-region>
           <span class="v-k">网络</span>
           <span id="v-net" class="v-v sm">↓--</span>
           <span id="v-net-up" class="v-v sm">↑--</span>
         </div>
-        <button type="button" id="btn-expand-v" class="icon-btn" title="展开" aria-label="展开">
-          <span class="chevron down"></span>
-        </button>
       </div>
 
       <div class="panel-view">
@@ -112,6 +122,27 @@
             <div class="meter-track">
               <div id="ov-mem-bar" class="meter-fill"></div>
             </div>
+          </div>
+
+          <div id="ov-swap-card" class="meter-row" hidden>
+            <div class="meter-top">
+              <span class="meter-label">Swap</span>
+              <span id="ov-swap" class="meter-value">--%</span>
+            </div>
+            <div class="meter-track">
+              <div id="ov-swap-bar" class="meter-fill"></div>
+            </div>
+          </div>
+
+          <div id="ov-gpu-card" class="meter-row">
+            <div class="meter-top">
+              <span class="meter-label">GPU</span>
+              <span id="ov-gpu" class="meter-value">--</span>
+            </div>
+            <div class="meter-track">
+              <div id="ov-gpu-bar" class="meter-fill"></div>
+            </div>
+            <div id="ov-gpu-detail" class="meter-detail">需启用 LibreHardwareMonitor</div>
           </div>
 
           <div id="ov-temp-card" class="meter-row">

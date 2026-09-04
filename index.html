@@ -60,6 +60,24 @@
           </section>
         </div>
 
+        <section id="gpu-card" class="metric-card compact-card">
+          <div class="metric-top">
+            <span class="metric-label">GPU</span>
+            <span id="gpu-value" class="metric-value small">--</span>
+          </div>
+          <div class="progress"><div id="gpu-bar" class="progress-bar"></div></div>
+          <div id="gpu-detail" class="metric-sub muted">需启用 LibreHardwareMonitor</div>
+        </section>
+
+        <section id="swap-card" class="metric-card compact-card" hidden>
+          <div class="metric-top">
+            <span class="metric-label">Swap</span>
+            <span id="swap-value" class="metric-value small">--%</span>
+          </div>
+          <div class="progress"><div id="swap-bar" class="progress-bar"></div></div>
+          <div id="swap-detail" class="metric-sub muted">-- / --</div>
+        </section>
+
         <section class="metric-card chart-card">
           <div class="metric-top">
             <span class="metric-label">历史曲线</span>
@@ -102,6 +120,23 @@
           </div>
           <div id="disk-list" class="disk-list muted">加载中...</div>
         </section>
+
+        <section id="process-top-card" class="metric-card compact-card" hidden>
+          <div class="metric-top">
+            <span class="metric-label">进程 Top</span>
+            <span class="muted process-top-hint">同名已合并</span>
+          </div>
+          <div class="process-top-grid">
+            <div>
+              <div class="process-top-subtitle muted">按 CPU</div>
+              <div id="process-top-cpu" class="process-list muted">--</div>
+            </div>
+            <div>
+              <div class="process-top-subtitle muted">按内存</div>
+              <div id="process-top-mem" class="process-list muted">--</div>
+            </div>
+          </div>
+        </section>
       </div>
 
       <div id="view-settings" class="view" role="tabpanel" hidden>
@@ -125,6 +160,11 @@
                 <label class="field">
                   <span class="field-label">温度（°C）</span>
                   <input id="setting-temp" type="number" min="40" max="120" step="1" required />
+                </label>
+
+                <label class="field">
+                  <span class="field-label">磁盘（%）</span>
+                  <input id="setting-disk" type="number" min="1" max="100" step="1" required />
                 </label>
 
                 <label class="field">
@@ -164,6 +204,14 @@
                 </label>
 
                 <label class="field switch-field">
+                  <span class="field-label">进程 Top（约 4 秒刷新）</span>
+                  <span class="toggle">
+                    <input id="setting-process-top" type="checkbox" />
+                    <span class="toggle-track"></span>
+                  </span>
+                </label>
+
+                <label class="field switch-field">
                   <span class="field-label">叠加层贴边自动隐藏</span>
                   <span class="toggle">
                     <input id="setting-overlay-auto-hide" type="checkbox" />
@@ -194,7 +242,7 @@
 
             <section class="metric-card settings-card">
               <div class="metric-top">
-                <span class="section-title">精确温度</span>
+                <span class="section-title">精确温度 / GPU</span>
               </div>
               <div class="settings-group">
                 <label class="field switch-field">
@@ -220,7 +268,8 @@
                 <button type="button" class="hint-toggle">了解更多</button>
                 <p class="settings-hint collapsible muted">
                   需本机运行 LibreHardwareMonitor 并开启 Remote Web
-                  Server；本应用不捆绑驱动，失败时自动回退 ACPI/WMI。
+                  Server；本应用不捆绑驱动。CPU 温度失败时回退 ACPI/WMI；GPU
+                  占用/显存/温度仅来自 LHM，无独立回退。
                 </p>
               </div>
             </section>

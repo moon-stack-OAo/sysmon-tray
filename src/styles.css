@@ -745,11 +745,59 @@ body {
   gap: 6px;
 }
 
+.process-top-hint {
+  font-size: var(--text-xs);
+}
+
+.process-top-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.process-top-subtitle {
+  font-size: var(--text-xs);
+  margin-bottom: 6px;
+}
+
+.process-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.process-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: baseline;
+  font-size: var(--text-xs);
+}
+
+.process-item .process-name {
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.process-item .process-meta {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--meta);
+  white-space: nowrap;
+}
+
 .disk-item .disk-title {
   color: var(--fg);
   margin-bottom: 3px;
   font-weight: 500;
   font-size: var(--text-sm);
+}
+
+.disk-item.alert .disk-title {
+  color: var(--text-danger);
 }
 
 .chart-card canvas {

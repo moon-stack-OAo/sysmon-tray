@@ -11,6 +11,11 @@ enum AlertKind {
     Cpu,
     Memory,
     Temperature,
+    Disk,
+}
+
+fn default_disk_percent() -> f32 {
+    90.0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22,6 +27,9 @@ pub struct AlertThresholds {
     pub memory_percent: f32,
     /// CPU 温度阈值（°C）；温度为 None 时跳过
     pub cpu_temp_celsius: f32,
+    /// 磁盘占用阈值（%）；任一盘达到即告警
+    #[serde(default = "default_disk_percent")]
+    pub disk_percent: f32,
     /// 同类告警冷却秒数
     pub cooldown_secs: u64,
 }
@@ -32,6 +40,7 @@ impl Default for AlertThresholds {
             cpu_percent: 90.0,
             memory_percent: 90.0,
             cpu_temp_celsius: 85.0,
+            disk_percent: default_disk_percent(),
             cooldown_secs: DEFAULT_COOLDOWN_SECS,
         }
     }
@@ -49,6 +58,9 @@ impl AlertThresholds {
         if !(40.0..=120.0).contains(&self.cpu_temp_celsius) {
             return Err("温度阈值须在 40–120".to_string());
         }
+        if !(1.0..=100.0).contains(&self.disk_percent) {
+            return Err("磁盘阈值须在 1–100".to_string());
+        }
         if !(5..=3600).contains(&self.cooldown_secs) {
             return Err("冷却秒数须在 5–3600".to_string());
         }
@@ -62,6 +74,7 @@ pub struct AlertStatus {
     pub cpu: bool,
     pub memory: bool,
     pub temperature: bool,
+    pub disk: bool,
     pub active: bool,
     pub messages: Vec<String>,
     pub thresholds: AlertThresholds,
@@ -139,12 +152,35 @@ impl AlertEngine {
             _ => false,
         };
 
-        let active = cpu || memory || temperature;
+        let mut disk = false;
+        let mut disk_notify = Vec::new();
+        for d in &metrics.disks {
+            if d.used_percent < t.disk_percent {
+                continue;
+            }
+            disk = true;
+            let mount = if d.mount_point.is_empty() {
+                d.name.as_str()
+            } else {
+                d.mount_point.as_str()
+            };
+            messages.push(format!("{mount} {:.0}%", d.used_percent));
+            disk_notify.push(format!(
+                "磁盘 {mount} 占用过高：{:.1}%（阈值 {:.0}%）",
+                d.used_percent, t.disk_percent
+            ));
+        }
+        if disk && self.try_fire(AlertKind::Disk) {
+            newly_fired.extend(disk_notify);
+        }
+
+        let active = cpu || memory || temperature || disk;
         (
             AlertStatus {
                 cpu,
                 memory,
                 temperature,
+                disk,
                 active,
                 messages,
                 thresholds: t,

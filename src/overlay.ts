@@ -5,18 +5,32 @@ interface AlertStatus {
   cpu: boolean;
   memory: boolean;
   temperature: boolean;
+  disk: boolean;
   active: boolean;
   messages: string[];
+}
+
+interface GpuMetrics {
+  name: string;
+  loadPercent: number | null;
+  memoryUsedBytes: number | null;
+  memoryTotalBytes: number | null;
+  memoryPercent: number | null;
+  tempCelsius: number | null;
 }
 
 interface Metrics {
   cpuPercent: number;
   memoryPercent: number;
+  swapUsedBytes: number;
+  swapTotalBytes: number;
   netDownBps: number;
   netUpBps: number;
   cpuTempCelsius: number | null;
+  gpu: GpuMetrics | null;
   sampledAtMs: number;
   alert: AlertStatus;
+  tempSource: string;
 }
 
 type OverlayStyle = 'capsule' | 'vertical' | 'numeric';
@@ -110,6 +124,72 @@ function setDot(el: HTMLElement | null, percent: number, alert = false) {
 function tempPercent(temp: number | null): number {
   if (temp == null) return 0;
   return Math.max(0, Math.min(100, ((temp - 30) / 70) * 100));
+}
+
+function formatBytesShort(bytes: number): string {
+  if (bytes <= 0) return '0B';
+  const units = ['B', 'K', 'M', 'G', 'T'];
+  const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / Math.pow(1024, exp);
+  if (exp === 0) return `${Math.round(value)}B`;
+  if (value >= 100) return `${Math.round(value)}${units[exp]}`;
+  return `${value.toFixed(1)}${units[exp]}`;
+}
+
+function gpuHasData(gpu: GpuMetrics | null): boolean {
+  return !!(
+    gpu &&
+    (gpu.loadPercent != null || gpu.tempCelsius != null || gpu.memoryPercent != null)
+  );
+}
+
+function gpuUnavailableHint(tempSource: string): string {
+  return tempSource === 'lhm' ? '暂不可用' : '需启用 LHM';
+}
+
+function formatGpuCompact(gpu: GpuMetrics | null, tempSource: string): string {
+  if (!gpuHasData(gpu) || !gpu) return gpuUnavailableHint(tempSource);
+  const parts: string[] = [];
+  if (gpu.loadPercent != null) parts.push(`${gpu.loadPercent.toFixed(0)}%`);
+  if (gpu.tempCelsius != null) parts.push(`${gpu.tempCelsius.toFixed(0)}°`);
+  if (gpu.memoryPercent != null) {
+    parts.push(`显${gpu.memoryPercent.toFixed(0)}%`);
+  } else if (gpu.memoryUsedBytes != null && gpu.memoryTotalBytes != null) {
+    parts.push(`${formatBytesShort(gpu.memoryUsedBytes)}`);
+  }
+  return parts.join('·') || '--';
+}
+
+/** 胶囊/数值收起态：仅占用%，温度与显存留给展开态 */
+function formatGpuStrip(gpu: GpuMetrics | null): string {
+  if (!gpu) return '--';
+  if (gpu.loadPercent != null) return `${gpu.loadPercent.toFixed(0)}%`;
+  if (gpu.tempCelsius != null) return `${gpu.tempCelsius.toFixed(0)}°`;
+  return '--';
+}
+
+function formatGpuNumeric(gpu: GpuMetrics | null): string {
+  if (!gpu) return '--';
+  if (gpu.loadPercent != null) return gpu.loadPercent.toFixed(0);
+  if (gpu.tempCelsius != null) return gpu.tempCelsius.toFixed(0);
+  return '--';
+}
+
+function formatGpuMemoryDetail(gpu: GpuMetrics): string {
+  if (gpu.memoryUsedBytes != null && gpu.memoryTotalBytes != null) {
+    return `显存 ${formatBytesShort(gpu.memoryUsedBytes)} / ${formatBytesShort(gpu.memoryTotalBytes)}`;
+  }
+  if (gpu.memoryPercent != null) {
+    return `显存 ${gpu.memoryPercent.toFixed(0)}%`;
+  }
+  return '显存 --';
+}
+
+function gpuLevelPercent(gpu: GpuMetrics | null): number {
+  if (!gpu) return 0;
+  if (gpu.loadPercent != null) return gpu.loadPercent;
+  if (gpu.memoryPercent != null) return gpu.memoryPercent;
+  return tempPercent(gpu.tempCelsius);
 }
 
 function applyStyleClass(next: OverlayStyle) {
@@ -238,6 +318,41 @@ function updateExpandedPanel(metrics: Metrics) {
     updated.textContent = new Date(Number(metrics.sampledAtMs)).toLocaleTimeString();
   }
 
+  const swapCard = document.querySelector('#ov-swap-card') as HTMLElement | null;
+  if (swapCard) {
+    if (metrics.swapTotalBytes === 0) {
+      swapCard.hidden = true;
+    } else {
+      swapCard.hidden = false;
+      const swapPercent = (metrics.swapUsedBytes / metrics.swapTotalBytes) * 100;
+      setText('ov-swap', `${swapPercent.toFixed(0)}%`);
+      setFill(
+        document.querySelector('#ov-swap-bar') as HTMLElement | null,
+        swapPercent,
+      );
+    }
+  }
+
+  const gpu = metrics.gpu;
+  if (gpuHasData(gpu) && gpu) {
+    const parts: string[] = [];
+    if (gpu.loadPercent != null) parts.push(`${gpu.loadPercent.toFixed(0)}%`);
+    if (gpu.tempCelsius != null) parts.push(`${gpu.tempCelsius.toFixed(0)}°C`);
+    setText('ov-gpu', parts.join(' · ') || '--');
+    setFill(document.querySelector('#ov-gpu-bar') as HTMLElement | null, gpuLevelPercent(gpu));
+    const detailParts: string[] = [];
+    if (gpu.name) detailParts.push(gpu.name);
+    detailParts.push(formatGpuMemoryDetail(gpu));
+    setText('ov-gpu-detail', detailParts.join(' · '));
+  } else {
+    setText('ov-gpu', '--');
+    setFill(document.querySelector('#ov-gpu-bar') as HTMLElement | null, 0);
+    setText(
+      'ov-gpu-detail',
+      metrics.tempSource === 'lhm' ? '暂不可用' : '需启用 LibreHardwareMonitor',
+    );
+  }
+
   setFill(
     document.querySelector('#ov-cpu-bar') as HTMLElement | null,
     metrics.cpuPercent,
@@ -261,6 +376,8 @@ function updateExpandedPanel(metrics: Metrics) {
 
 function updateCapsuleStrip(metrics: Metrics) {
   const alert = metrics.alert;
+  const gpu = metrics.gpu;
+  const gpuPct = gpuLevelPercent(gpu);
 
   const stripAlert = document.querySelector('#strip-alert') as HTMLElement | null;
   if (stripAlert) stripAlert.hidden = !alert.active;
@@ -271,6 +388,7 @@ function updateCapsuleStrip(metrics: Metrics) {
     'strip-temp',
     metrics.cpuTempCelsius == null ? '--' : `${metrics.cpuTempCelsius.toFixed(0)}°C`,
   );
+  setText('strip-gpu', formatGpuStrip(gpu));
   setText('strip-net-down', formatSpeedShort(metrics.netDownBps));
   setText('strip-net-up', formatSpeedShort(metrics.netUpBps));
 
@@ -289,6 +407,7 @@ function updateCapsuleStrip(metrics: Metrics) {
     tempPercent(metrics.cpuTempCelsius),
     alert.temperature,
   );
+  setDot(document.querySelector('#strip-gpu-dot') as HTMLElement | null, gpuPct);
 
   document.querySelector('.strip-metric[data-metric="cpu"]')?.classList.toggle('alert', alert.cpu);
   document
@@ -301,10 +420,12 @@ function updateCapsuleStrip(metrics: Metrics) {
 
 function updateNumericStrip(metrics: Metrics) {
   const alert = metrics.alert;
+  const gpu = metrics.gpu;
 
   setText('num-cpu', metrics.cpuPercent.toFixed(0));
   setText('num-mem', metrics.memoryPercent.toFixed(0));
   setText('num-temp', metrics.cpuTempCelsius == null ? '--' : metrics.cpuTempCelsius.toFixed(0));
+  setText('num-gpu', formatGpuNumeric(gpu));
   setText(
     'num-net',
     `↓${formatSpeedShort(metrics.netDownBps)} ↑${formatSpeedShort(metrics.netUpBps)}`,
@@ -317,6 +438,7 @@ function updateNumericStrip(metrics: Metrics) {
 
 function updateVerticalStrip(metrics: Metrics) {
   const alert = metrics.alert;
+  const gpu = metrics.gpu;
 
   setText('v-cpu', `${metrics.cpuPercent.toFixed(0)}%`);
   setText('v-mem', `${metrics.memoryPercent.toFixed(0)}%`);
@@ -324,6 +446,7 @@ function updateVerticalStrip(metrics: Metrics) {
     'v-temp',
     metrics.cpuTempCelsius == null ? '--' : `${metrics.cpuTempCelsius.toFixed(0)}°C`,
   );
+  setText('v-gpu', formatGpuCompact(gpu, metrics.tempSource));
   setText('v-net', `↓${formatSpeedShort(metrics.netDownBps)}`);
   setText('v-net-up', `↑${formatSpeedShort(metrics.netUpBps)}`);
 
@@ -357,7 +480,7 @@ async function refreshOverlay() {
 }
 
 function bindCollapseUi() {
-  const expandIds = ['#btn-expand', '#btn-expand-num', '#btn-expand-v'];
+  const expandIds = ['#btn-expand', '#btn-expand-num'];
   for (const id of expandIds) {
     document.querySelector(id)?.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -415,7 +538,7 @@ window.addEventListener('DOMContentLoaded', () => {
   applyStyleClass('capsule');
   applyModeClass('collapsed');
   mode = 'collapsed';
-  // 仅按最终配置 resize 一次；窗口初始尺寸(310x38)即 collapsed capsule 尺寸，配置加载失败也无需回退
+  // 仅按最终配置 resize 一次；窗口初始尺寸即 collapsed capsule 尺寸，配置加载失败也无需回退
   void loadOverlayConfig().then(() => {
     // 后端仅在 overlay_enabled 时才显示窗口；禁用时 webview 虽存活，但不应驱动每秒采样
     if (overlayEnabled) {

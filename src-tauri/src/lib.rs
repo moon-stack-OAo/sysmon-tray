@@ -12,8 +12,8 @@ use config::{
 };
 use history::{history_capacity_for_minutes, HistoryPoint};
 use monitor::{
-    sample_cached_shared, Metrics, MonitorState, SharedMonitor, SharedTemperature,
-    METRICS_CACHE_MIN_INTERVAL,
+    sample_cached_shared, Metrics, MonitorState, ProcessTopSnapshot, SharedMonitor,
+    SharedTemperature, METRICS_CACHE_MIN_INTERVAL,
 };
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,7 +26,7 @@ use tauri::{
 };
 use tauri_plugin_notification::NotificationExt;
 use temperature::ChainedTemperatureProvider;
-use temperature_lhm::{LhmRuntimeConfig, TempSourceKind, TempSourceTracker};
+use temperature_lhm::{LhmRuntimeConfig, SharedGpuCache, TempSourceKind, TempSourceTracker};
 
 pub type SharedSettingsOpen = Mutex<bool>;
 pub type SharedLhmRuntime = Arc<LhmRuntimeConfig>;
@@ -43,14 +43,14 @@ const OVERLAY_SNAP_CORNER_BONUS_PX: i32 = 12;
 const OVERLAY_SNAP_DEBOUNCE_MS: u64 = 220;
 const OVERLAY_LAYOUT_QUIET_MS: u64 = 500;
 const MAIN_POS_SAVE_DEBOUNCE_MS: u64 = 250;
-const OVERLAY_COLLAPSED_WIDTH: u32 = 310;
+const OVERLAY_COLLAPSED_WIDTH: u32 = 378;
 const OVERLAY_COLLAPSED_HEIGHT: u32 = 38;
-const OVERLAY_VERTICAL_WIDTH: u32 = 72;
-const OVERLAY_VERTICAL_HEIGHT: u32 = 168;
-const OVERLAY_NUMERIC_WIDTH: u32 = 258;
+const OVERLAY_VERTICAL_WIDTH: u32 = 76;
+const OVERLAY_VERTICAL_HEIGHT: u32 = 200;
+const OVERLAY_NUMERIC_WIDTH: u32 = 246;
 const OVERLAY_NUMERIC_HEIGHT: u32 = 34;
 const OVERLAY_EXPANDED_WIDTH: u32 = 310;
-const OVERLAY_EXPANDED_HEIGHT: u32 = 176;
+const OVERLAY_EXPANDED_HEIGHT: u32 = 252;
 const OVERLAY_PEEK_THICKNESS: u32 = 8;
 const OVERLAY_PEEK_LENGTH: u32 = 96;
 
@@ -126,10 +126,10 @@ fn temp_source_message(
     }
 
     match kind {
-        TempSourceKind::Lhm => "已连接 LibreHardwareMonitor".to_string(),
-        TempSourceKind::Wmi => "未检测到 LHM · 已回退 ACPI/WMI".to_string(),
-        TempSourceKind::Sysinfo => "未检测到 LHM · 已回退 sysinfo".to_string(),
-        TempSourceKind::Unavailable => "未检测到 LHM · 温度暂不可用".to_string(),
+        TempSourceKind::Lhm => "已连接 LibreHardwareMonitor（含 GPU）".to_string(),
+        TempSourceKind::Wmi => "未检测到 LHM · 已回退 ACPI/WMI（GPU 需 LHM）".to_string(),
+        TempSourceKind::Sysinfo => "未检测到 LHM · 已回退 sysinfo（GPU 需 LHM）".to_string(),
+        TempSourceKind::Unavailable => "未检测到 LHM · 温度/GPU 暂不可用".to_string(),
     }
 }
 
@@ -138,12 +138,18 @@ fn get_metrics(
     app: tauri::AppHandle,
     monitor: tauri::State<'_, SharedMonitor>,
     temperature: tauri::State<'_, SharedTemperature>,
+    gpu_cache: tauri::State<'_, SharedGpuCache>,
     alerts: tauri::State<'_, SharedAlerts>,
     config: tauri::State<'_, SharedConfig>,
     tracker: tauri::State<'_, SharedTempTracker>,
 ) -> Result<MetricsResponse, String> {
     // 主面板与叠加层共用短时缓存，避免双采样打乱网速差分；温度 IO 在 monitor 锁外进行
-    let metrics = sample_cached_shared(&monitor, &temperature, METRICS_CACHE_MIN_INTERVAL)?;
+    let metrics = sample_cached_shared(
+        &monitor,
+        &temperature,
+        &gpu_cache,
+        METRICS_CACHE_MIN_INTERVAL,
+    )?;
 
     let temp_source = tracker.get().as_str().to_string();
 
@@ -178,6 +184,31 @@ fn get_metrics_history(
 ) -> Result<Vec<HistoryPoint>, String> {
     let monitor = monitor.lock().map_err(|e| e.to_string())?;
     Ok(monitor.history_snapshot())
+}
+
+#[tauri::command]
+fn get_process_top(
+    monitor: tauri::State<'_, SharedMonitor>,
+    config: tauri::State<'_, SharedConfig>,
+) -> Result<ProcessTopSnapshot, String> {
+    let enabled = {
+        let cfg = config.lock().map_err(|e| e.to_string())?;
+        cfg.process_top_enabled
+    };
+    let mut state = monitor.lock().map_err(|e| e.to_string())?;
+    Ok(state.sample_process_top_cached(enabled))
+}
+
+#[tauri::command]
+fn set_process_top_enabled(
+    enabled: bool,
+    config: tauri::State<'_, SharedConfig>,
+) -> Result<bool, String> {
+    mutate_config(&config, |next| {
+        next.process_top_enabled = enabled;
+        Ok(())
+    })?;
+    Ok(enabled)
 }
 
 #[tauri::command]
@@ -317,6 +348,7 @@ struct SettingsInput {
     autostart_enabled: bool,
     overlay_auto_hide: bool,
     overlay_style: String,
+    process_top_enabled: bool,
 }
 
 impl SettingsInput {
@@ -331,6 +363,7 @@ impl SettingsInput {
             autostart_enabled: false,
             overlay_auto_hide: false,
             overlay_style: "capsule".to_string(),
+            process_top_enabled: false,
         }
     }
 }
@@ -347,6 +380,7 @@ struct SettingsResponse {
     autostart_enabled: bool,
     overlay_auto_hide: bool,
     overlay_style: String,
+    process_top_enabled: bool,
 }
 
 /// 设置页聚合保存：全部校验与可失败操作通过后仅落盘一次，避免中途失败导致部分生效
@@ -390,6 +424,7 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
         next.autostart_enabled = input.autostart_enabled;
         next.overlay_auto_hide = input.overlay_auto_hide;
         next.overlay_style = parsed_style;
+        next.process_top_enabled = input.process_top_enabled;
         if let Some(pos) = overlay_pos {
             next.overlay_x = Some(pos.x);
             next.overlay_y = Some(pos.y);
@@ -443,6 +478,7 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
         autostart_enabled: input.autostart_enabled,
         overlay_auto_hide: input.overlay_auto_hide,
         overlay_style: parsed_style.as_str().to_string(),
+        process_top_enabled: input.process_top_enabled,
     })
 }
 
@@ -1249,9 +1285,11 @@ pub fn run() {
         initial_config.lhm_base_url.clone(),
     );
     let temp_tracker = TempSourceTracker::new();
+    let gpu_cache: SharedGpuCache = Arc::new(Mutex::new(None));
     let temperature_provider = ChainedTemperatureProvider::platform_default(
         Arc::clone(&lhm_runtime),
         Arc::clone(&temp_tracker),
+        Arc::clone(&gpu_cache),
     );
 
     tauri::Builder::default()
@@ -1277,9 +1315,12 @@ pub fn run() {
         .manage(SharedMainLastMove(Mutex::new(None)))
         .manage(lhm_runtime as SharedLhmRuntime)
         .manage(temp_tracker as SharedTempTracker)
+        .manage(gpu_cache)
         .invoke_handler(tauri::generate_handler![
             get_metrics,
             get_metrics_history,
+            get_process_top,
+            set_process_top_enabled,
             get_alert_thresholds,
             set_alert_thresholds,
             reset_alert_thresholds,

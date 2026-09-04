@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "SysMon",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "identifier": "com.sysmon.tray",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -31,7 +31,7 @@
         "label": "overlay",
         "title": "系统监测叠加层",
         "url": "overlay.html",
-        "width": 310,
+        "width": 378,
         "height": 38,
         "resizable": false,
         "decorations": false,

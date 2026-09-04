@@ -1,15 +1,22 @@
 use crate::history::MetricsHistory;
 use crate::temperature::{ChainedTemperatureProvider, TemperatureProvider};
+use crate::temperature_lhm::{GpuMetrics, SharedGpuCache};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use sysinfo::{Disks, Networks, System};
+use sysinfo::{Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// 多窗口同时拉取时，短于此间隔则返回缓存，避免网速差分被打乱
 pub const METRICS_CACHE_MIN_INTERVAL: Duration = Duration::from_millis(700);
 
 /// 距上次真实采样超过该间隔（长时间无请求、休眠恢复）时差分失真，本帧网速置 0
 pub const NET_DIFF_MAX_INTERVAL: Duration = Duration::from_secs(5);
+
+/// 进程 Top 列表独立降频，避免每秒全量 refresh 进程
+pub const PROCESS_TOP_MIN_INTERVAL: Duration = Duration::from_secs(4);
+
+pub const PROCESS_TOP_N: usize = 5;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +41,26 @@ pub struct Metrics {
     pub net_up_bps: u64,
     pub disks: Vec<DiskStat>,
     pub cpu_temp_celsius: Option<f32>,
+    /// 仅 LHM 可用；无可靠低成本回退时为 None
+    pub gpu: Option<GpuMetrics>,
+    pub sampled_at_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessTopEntry {
+    pub name: String,
+    pub cpu_percent: f32,
+    pub memory_bytes: u64,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessTopSnapshot {
+    pub enabled: bool,
+    pub by_cpu: Vec<ProcessTopEntry>,
+    pub by_memory: Vec<ProcessTopEntry>,
     pub sampled_at_ms: u128,
 }
 
@@ -47,6 +74,8 @@ pub struct MonitorState {
     last_net_up: u64,
     /// 最近一次真实采样结果（供短时缓存）
     last_metrics: Option<Metrics>,
+    last_process_top_at: Option<Instant>,
+    last_process_top: Option<ProcessTopSnapshot>,
 }
 
 impl MonitorState {
@@ -72,11 +101,94 @@ impl MonitorState {
             last_net_down: net_down,
             last_net_up: net_up,
             last_metrics: None,
+            last_process_top_at: None,
+            last_process_top: None,
         }
     }
 
     pub fn set_history_capacity(&mut self, capacity: usize) {
         self.history.set_capacity(capacity);
+    }
+
+    /// 进程 Top：与 metrics 缓存独立，默认关闭时不 refresh；开启后按 PROCESS_TOP_MIN_INTERVAL 降频。
+    /// 同名进程合并 CPU/内存，展示 count；CPU 需至少两轮 refresh 后才有意义。
+    pub fn sample_process_top_cached(&mut self, enabled: bool) -> ProcessTopSnapshot {
+        if !enabled {
+            let empty = ProcessTopSnapshot {
+                enabled: false,
+                by_cpu: Vec::new(),
+                by_memory: Vec::new(),
+                sampled_at_ms: 0,
+            };
+            self.last_process_top = None;
+            self.last_process_top_at = None;
+            return empty;
+        }
+
+        if let (Some(at), Some(cached)) = (self.last_process_top_at, self.last_process_top.as_ref())
+        {
+            if at.elapsed() < PROCESS_TOP_MIN_INTERVAL {
+                return cached.clone();
+            }
+        }
+
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_cpu().with_memory(),
+        );
+
+        let mut merged: HashMap<String, (f32, u64, u32)> = HashMap::new();
+        for (_, proc) in self.system.processes() {
+            let name = proc.name().to_string_lossy().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let entry = merged.entry(name).or_insert((0.0, 0, 0));
+            entry.0 += proc.cpu_usage();
+            entry.1 = entry.1.saturating_add(proc.memory());
+            entry.2 = entry.2.saturating_add(1);
+        }
+
+        let mut entries: Vec<ProcessTopEntry> = merged
+            .into_iter()
+            .map(|(name, (cpu_percent, memory_bytes, count))| ProcessTopEntry {
+                name,
+                cpu_percent,
+                memory_bytes,
+                count,
+            })
+            .collect();
+
+        let mut by_cpu = entries.clone();
+        by_cpu.sort_by(|a, b| {
+            b.cpu_percent
+                .partial_cmp(&a.cpu_percent)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        by_cpu.truncate(PROCESS_TOP_N);
+
+        entries.sort_by(|a, b| {
+            b.memory_bytes
+                .cmp(&a.memory_bytes)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        entries.truncate(PROCESS_TOP_N);
+        let by_memory = entries;
+
+        let snapshot = ProcessTopSnapshot {
+            enabled: true,
+            by_cpu,
+            by_memory,
+            sampled_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+        };
+        self.last_process_top_at = Some(Instant::now());
+        self.last_process_top = Some(snapshot.clone());
+        snapshot
     }
 
     /// 锁内仅完成 sysinfo 采样与网速差分；温度 IO 由 sample_cached_shared 在锁外回填。
@@ -140,6 +252,7 @@ impl MonitorState {
         };
 
         let last_temp = self.last_metrics.as_ref().and_then(|m| m.cpu_temp_celsius);
+        let last_gpu = self.last_metrics.as_ref().and_then(|m| m.gpu.clone());
 
         let metrics = Metrics {
             cpu_percent: self.system.global_cpu_usage(),
@@ -152,6 +265,7 @@ impl MonitorState {
             net_up_bps,
             disks,
             cpu_temp_celsius: last_temp,
+            gpu: last_gpu,
             sampled_at_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis())
@@ -194,9 +308,11 @@ pub type SharedTemperature = Mutex<ChainedTemperatureProvider>;
 /// 主面板与叠加层共用的采样入口：距上次真实采样不足 `min_interval` 返回缓存。
 /// 真实采样时锁内完成 sysinfo 采样与网速差分，释放锁后再读温度（LHM/WMI IO
 /// 最长可达数百毫秒），避免阻塞 get_metrics_history 等共享读者。
+/// GPU 随 LHM 同一次请求写入 gpu_cache，在此回填到 Metrics。
 pub fn sample_cached_shared(
     monitor: &SharedMonitor,
     temperature: &SharedTemperature,
+    gpu_cache: &SharedGpuCache,
     min_interval: Duration,
 ) -> Result<Metrics, String> {
     let (mut metrics, needs_temp) = {
@@ -215,6 +331,10 @@ pub fn sample_cached_shared(
             provider.read_cpu_temp_celsius()
         };
         metrics.cpu_temp_celsius = temp;
+        metrics.gpu = gpu_cache
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone();
 
         let mut state = monitor.lock().map_err(|e| e.to_string())?;
         state.complete_sample(metrics.clone());

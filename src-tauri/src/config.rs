@@ -41,6 +41,10 @@ fn default_overlay_style() -> OverlayStyle {
     OverlayStyle::Capsule
 }
 
+fn default_process_top_enabled() -> bool {
+    false
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum OverlayStyle {
@@ -119,6 +123,9 @@ pub struct AppConfig {
     /// 叠加层收起态形态：capsule / vertical / numeric
     #[serde(default = "default_overlay_style")]
     pub overlay_style: OverlayStyle,
+    /// 是否启用主面板进程 Top N（默认关，开启后约 4s 降频刷新）
+    #[serde(default = "default_process_top_enabled")]
+    pub process_top_enabled: bool,
     /// 主面板窗口物理坐标 X（None 表示首次按托盘定位）
     #[serde(default)]
     pub main_x: Option<i32>,
@@ -151,6 +158,7 @@ impl Default for AppConfig {
             autostart_enabled: default_autostart_enabled(),
             overlay_auto_hide: default_overlay_auto_hide(),
             overlay_style: default_overlay_style(),
+            process_top_enabled: default_process_top_enabled(),
             main_x: None,
             main_y: None,
             overlay_x: None,
@@ -410,7 +418,7 @@ mod tests {
         let path = dir.join("config.json");
         fs::write(
             &path,
-            r#"{"alert":{"cpuPercent":-5,"memoryPercent":90,"cpuTempCelsius":85,"cooldownSecs":60},"notificationEnabled":false}"#,
+            r#"{"alert":{"cpuPercent":-5,"memoryPercent":90,"cpuTempCelsius":85,"diskPercent":90,"cooldownSecs":60},"notificationEnabled":false}"#,
         )
         .unwrap();
 

@@ -14,6 +14,7 @@ interface AlertThresholds {
   cpuPercent: number;
   memoryPercent: number;
   cpuTempCelsius: number;
+  diskPercent: number;
   cooldownSecs: number;
 }
 
@@ -27,8 +28,23 @@ interface AppConfig {
   autostartEnabled: boolean;
   overlayAutoHide: boolean;
   overlayStyle: 'capsule' | 'vertical' | 'numeric';
+  processTopEnabled: boolean;
   overlayX?: number | null;
   overlayY?: number | null;
+}
+
+interface ProcessTopEntry {
+  name: string;
+  cpuPercent: number;
+  memoryBytes: number;
+  count: number;
+}
+
+interface ProcessTopSnapshot {
+  enabled: boolean;
+  byCpu: ProcessTopEntry[];
+  byMemory: ProcessTopEntry[];
+  sampledAtMs: number;
 }
 
 interface TempSourceStatus {
@@ -44,9 +60,19 @@ interface AlertStatus {
   cpu: boolean;
   memory: boolean;
   temperature: boolean;
+  disk: boolean;
   active: boolean;
   messages: string[];
   thresholds: AlertThresholds;
+}
+
+interface GpuMetrics {
+  name: string;
+  loadPercent: number | null;
+  memoryUsedBytes: number | null;
+  memoryTotalBytes: number | null;
+  memoryPercent: number | null;
+  tempCelsius: number | null;
 }
 
 interface Metrics {
@@ -60,6 +86,7 @@ interface Metrics {
   netUpBps: number;
   disks: DiskStat[];
   cpuTempCelsius: number | null;
+  gpu: GpuMetrics | null;
   sampledAtMs: number;
   alert: AlertStatus;
   tempSource: string;
@@ -79,6 +106,9 @@ const ALLOWED_HISTORY_RANGE_MINUTES = [1, 5, 15, 60] as const;
 let currentTab: TabId = 'monitor';
 let settingsMessageTimer: number | undefined;
 let historyRangeMinutes = 1;
+let processTopEnabled = false;
+let lastProcessTopFetchAt = 0;
+const PROCESS_TOP_UI_INTERVAL_MS = 4000;
 
 function formatBytes(bytes: number): string {
   if (bytes <= 0) return '0 B';
@@ -101,7 +131,12 @@ function setBar(el: HTMLElement | null, percent: number, alert = false) {
   else if (value >= 75) el.classList.add('warn');
 }
 
-function renderDiskList(diskList: HTMLElement, disks: DiskStat[]) {
+function renderDiskList(
+  diskList: HTMLElement,
+  disks: DiskStat[],
+  diskAlert = false,
+  diskThreshold = 90,
+) {
   if (!disks.length) {
     diskList.replaceChildren();
     diskList.textContent = '未检测到磁盘';
@@ -143,9 +178,11 @@ function renderDiskList(diskList: HTMLElement, disks: DiskStat[]) {
     const barEl = item.querySelector('.progress-bar') as HTMLElement | null;
     const subEl = item.querySelector('.metric-sub');
     const used = disk.totalBytes - disk.availableBytes;
+    const over = diskAlert && disk.usedPercent >= diskThreshold;
 
     if (titleEl) titleEl.textContent = disk.mountPoint || disk.name;
-    setBar(barEl, disk.usedPercent);
+    setBar(barEl, disk.usedPercent, over);
+    item.classList.toggle('alert', over);
     if (subEl) {
       subEl.textContent = `${formatBytes(used)} / ${formatBytes(disk.totalBytes)} · ${disk.usedPercent.toFixed(1)}%`;
     }
@@ -156,6 +193,88 @@ function setCardAlert(selector: string, active: boolean) {
   const card = document.querySelector(selector);
   if (!card) return;
   card.classList.toggle('alert', active);
+}
+
+function renderProcessList(
+  listEl: HTMLElement,
+  entries: ProcessTopEntry[],
+  mode: 'cpu' | 'memory',
+) {
+  if (!entries.length) {
+    listEl.replaceChildren();
+    listEl.textContent = '暂无数据';
+    return;
+  }
+
+  if (listEl.childElementCount === 0) {
+    listEl.textContent = '';
+  }
+
+  const existing = Array.from(listEl.querySelectorAll<HTMLElement>('.process-item'));
+  while (existing.length > entries.length) {
+    existing.pop()?.remove();
+  }
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    let item = existing[i];
+    if (!item) {
+      item = document.createElement('div');
+      item.className = 'process-item';
+      const name = document.createElement('div');
+      name.className = 'process-name';
+      const meta = document.createElement('div');
+      meta.className = 'process-meta';
+      item.append(name, meta);
+      listEl.appendChild(item);
+    }
+
+    const nameEl = item.querySelector('.process-name');
+    const metaEl = item.querySelector('.process-meta');
+    const suffix = entry.count > 1 ? ` ×${entry.count}` : '';
+    if (nameEl) nameEl.textContent = `${entry.name}${suffix}`;
+    if (metaEl) {
+      metaEl.textContent =
+        mode === 'cpu'
+          ? `${entry.cpuPercent.toFixed(1)}%`
+          : formatBytes(entry.memoryBytes);
+    }
+  }
+}
+
+function setProcessTopVisible(enabled: boolean) {
+  const card = document.querySelector('#process-top-card') as HTMLElement | null;
+  if (card) card.hidden = !enabled;
+}
+
+async function refreshProcessTop(force = false) {
+  const card = document.querySelector('#process-top-card') as HTMLElement | null;
+  if (!processTopEnabled) {
+    setProcessTopVisible(false);
+    return;
+  }
+  setProcessTopVisible(true);
+
+  const now = Date.now();
+  if (!force && now - lastProcessTopFetchAt < PROCESS_TOP_UI_INTERVAL_MS) {
+    return;
+  }
+
+  try {
+    const snap = await invoke<ProcessTopSnapshot>('get_process_top');
+    lastProcessTopFetchAt = now;
+    processTopEnabled = snap.enabled;
+    setProcessTopVisible(snap.enabled);
+    if (!snap.enabled) return;
+
+    const cpuList = document.querySelector('#process-top-cpu') as HTMLElement | null;
+    const memList = document.querySelector('#process-top-mem') as HTMLElement | null;
+    if (cpuList) renderProcessList(cpuList, snap.byCpu, 'cpu');
+    if (memList) renderProcessList(memList, snap.byMemory, 'memory');
+    if (card) card.hidden = false;
+  } catch (error) {
+    console.error('获取进程 Top 失败', error);
+  }
 }
 
 function normalizeHistoryRangeMinutes(minutes: number): number {
@@ -380,6 +499,10 @@ async function refreshMetrics() {
     const memValue = document.querySelector('#mem-value');
     const memBar = document.querySelector('#mem-bar') as HTMLElement | null;
     const memDetail = document.querySelector('#mem-detail');
+    const swapCard = document.querySelector('#swap-card') as HTMLElement | null;
+    const swapValue = document.querySelector('#swap-value');
+    const swapBar = document.querySelector('#swap-bar') as HTMLElement | null;
+    const swapDetail = document.querySelector('#swap-detail');
     const netDown = document.querySelector('#net-down');
     const netUp = document.querySelector('#net-up');
     const diskList = document.querySelector('#disk-list');
@@ -413,11 +536,69 @@ async function refreshMetrics() {
       memDetail.textContent = `${formatBytes(metrics.memoryUsedBytes)} / ${formatBytes(metrics.memoryTotalBytes)}`;
     }
 
+    if (swapCard) {
+      if (metrics.swapTotalBytes === 0) {
+        swapCard.hidden = true;
+      } else {
+        swapCard.hidden = false;
+        const swapPercent =
+          (metrics.swapUsedBytes / metrics.swapTotalBytes) * 100;
+        if (swapValue) swapValue.textContent = `${swapPercent.toFixed(1)}%`;
+        setBar(swapBar, swapPercent);
+        if (swapDetail) {
+          swapDetail.textContent = `${formatBytes(metrics.swapUsedBytes)} / ${formatBytes(metrics.swapTotalBytes)}`;
+        }
+      }
+    }
+
+    const gpuValue = document.querySelector('#gpu-value');
+    const gpuBar = document.querySelector('#gpu-bar') as HTMLElement | null;
+    const gpuDetail = document.querySelector('#gpu-detail');
+    const gpu = metrics.gpu;
+    if (gpu && (gpu.loadPercent != null || gpu.tempCelsius != null || gpu.memoryPercent != null)) {
+      if (gpu.loadPercent != null) {
+        if (gpuValue) gpuValue.textContent = `${gpu.loadPercent.toFixed(1)}%`;
+        setBar(gpuBar, gpu.loadPercent);
+      } else if (gpuValue) {
+        gpuValue.textContent = gpu.tempCelsius != null ? `${gpu.tempCelsius.toFixed(0)}°C` : '--';
+        setBar(gpuBar, 0);
+      }
+      if (gpuDetail) {
+        const parts: string[] = [];
+        if (gpu.name) parts.push(gpu.name);
+        if (gpu.tempCelsius != null) parts.push(`${gpu.tempCelsius.toFixed(1)} °C`);
+        if (gpu.memoryUsedBytes != null && gpu.memoryTotalBytes != null) {
+          parts.push(
+            `${formatBytes(gpu.memoryUsedBytes)} / ${formatBytes(gpu.memoryTotalBytes)}`,
+          );
+        } else if (gpu.memoryPercent != null) {
+          parts.push(`显存 ${gpu.memoryPercent.toFixed(1)}%`);
+        }
+        gpuDetail.textContent = parts.join(' · ') || 'GPU';
+      }
+    } else {
+      if (gpuValue) gpuValue.textContent = '--';
+      setBar(gpuBar, 0);
+      if (gpuDetail) {
+        gpuDetail.textContent =
+          metrics.tempSource === 'lhm'
+            ? '暂不可用'
+            : '需启用 LibreHardwareMonitor';
+      }
+    }
+
     if (netDown) netDown.textContent = formatSpeed(metrics.netDownBps);
     if (netUp) netUp.textContent = formatSpeed(metrics.netUpBps);
 
     if (diskList) {
-      renderDiskList(diskList as HTMLElement, metrics.disks);
+      renderDiskList(
+        diskList as HTMLElement,
+        metrics.disks,
+        alert.disk,
+        alert.thresholds.diskPercent,
+      );
+      const diskCard = diskList.closest('.metric-card');
+      diskCard?.classList.toggle('alert', alert.disk);
     }
 
     if (updatedAt) {
@@ -440,6 +621,7 @@ async function refreshMetrics() {
 
     if (currentTab === 'monitor') {
       await refreshHistoryChart();
+      await refreshProcessTop();
     }
 
     if (currentTab === 'settings') {
@@ -484,6 +666,7 @@ interface SettingsFormValues {
   autostartEnabled?: boolean;
   overlayAutoHide?: boolean;
   overlayStyle?: 'capsule' | 'vertical' | 'numeric';
+  processTopEnabled?: boolean;
 }
 
 function fillSettingsForm(values: SettingsFormValues) {
@@ -497,10 +680,12 @@ function fillSettingsForm(values: SettingsFormValues) {
     autostartEnabled,
     overlayAutoHide,
     overlayStyle,
+    processTopEnabled: processTop,
   } = values;
   const cpu = document.querySelector('#setting-cpu') as HTMLInputElement | null;
   const memory = document.querySelector('#setting-memory') as HTMLInputElement | null;
   const temp = document.querySelector('#setting-temp') as HTMLInputElement | null;
+  const disk = document.querySelector('#setting-disk') as HTMLInputElement | null;
   const cooldown = document.querySelector('#setting-cooldown') as HTMLInputElement | null;
   const notification = document.querySelector('#setting-notification') as HTMLInputElement | null;
   const overlay = document.querySelector('#setting-overlay') as HTMLInputElement | null;
@@ -514,10 +699,12 @@ function fillSettingsForm(values: SettingsFormValues) {
   const historyRange = document.querySelector('#setting-history-range') as HTMLSelectElement | null;
   const preciseTemp = document.querySelector('#setting-precise-temp') as HTMLInputElement | null;
   const lhmUrl = document.querySelector('#setting-lhm-url') as HTMLInputElement | null;
+  const processTopEl = document.querySelector('#setting-process-top') as HTMLInputElement | null;
 
   if (cpu) cpu.value = String(Math.round(thresholds.cpuPercent));
   if (memory) memory.value = String(Math.round(thresholds.memoryPercent));
   if (temp) temp.value = String(Math.round(thresholds.cpuTempCelsius));
+  if (disk) disk.value = String(Math.round(thresholds.diskPercent));
   if (cooldown) cooldown.value = String(thresholds.cooldownSecs);
   if (notification && notificationEnabled !== undefined) {
     notification.checked = notificationEnabled;
@@ -542,6 +729,9 @@ function fillSettingsForm(values: SettingsFormValues) {
   }
   if (lhmUrl && lhmBaseUrl !== undefined) {
     lhmUrl.value = lhmBaseUrl || DEFAULT_LHM_BASE_URL;
+  }
+  if (processTopEl && processTop !== undefined) {
+    processTopEl.checked = processTop;
   }
 }
 
@@ -568,6 +758,11 @@ function readOverlayAutoHide(): boolean {
 function readOverlayStyle(): 'capsule' | 'vertical' | 'numeric' {
   const el = document.querySelector('#setting-overlay-style') as HTMLSelectElement | null;
   return normalizeOverlayStyle(el?.value);
+}
+
+function readProcessTopEnabled(): boolean {
+  const el = document.querySelector('#setting-process-top') as HTMLInputElement | null;
+  return el?.checked ?? false;
 }
 
 function readHistoryRangeMinutes(): number {
@@ -603,13 +798,15 @@ function readSettingsForm(): AlertThresholds | null {
   const cpu = document.querySelector('#setting-cpu') as HTMLInputElement | null;
   const memory = document.querySelector('#setting-memory') as HTMLInputElement | null;
   const temp = document.querySelector('#setting-temp') as HTMLInputElement | null;
+  const disk = document.querySelector('#setting-disk') as HTMLInputElement | null;
   const cooldown = document.querySelector('#setting-cooldown') as HTMLInputElement | null;
-  if (!cpu || !memory || !temp || !cooldown) return null;
+  if (!cpu || !memory || !temp || !disk || !cooldown) return null;
 
   const thresholds: AlertThresholds = {
     cpuPercent: Number(cpu.value),
     memoryPercent: Number(memory.value),
     cpuTempCelsius: Number(temp.value),
+    diskPercent: Number(disk.value),
     cooldownSecs: Number(cooldown.value),
   };
 
@@ -617,6 +814,7 @@ function readSettingsForm(): AlertThresholds | null {
     !Number.isFinite(thresholds.cpuPercent) ||
     !Number.isFinite(thresholds.memoryPercent) ||
     !Number.isFinite(thresholds.cpuTempCelsius) ||
+    !Number.isFinite(thresholds.diskPercent) ||
     !Number.isFinite(thresholds.cooldownSecs)
   ) {
     return null;
@@ -635,11 +833,13 @@ interface AppliedSettings {
   autostartEnabled: boolean;
   overlayAutoHide: boolean;
   overlayStyle: string;
+  processTopEnabled: boolean;
 }
 
 async function loadSettingsForm() {
   const cfg = await invoke<AppConfig>('get_app_config');
   historyRangeMinutes = normalizeHistoryRangeMinutes(cfg.historyRangeMinutes);
+  processTopEnabled = !!cfg.processTopEnabled;
   fillSettingsForm({
     thresholds: cfg.alert,
     notificationEnabled: cfg.notificationEnabled,
@@ -650,6 +850,7 @@ async function loadSettingsForm() {
     autostartEnabled: cfg.autostartEnabled,
     overlayAutoHide: cfg.overlayAutoHide,
     overlayStyle: normalizeOverlayStyle(cfg.overlayStyle),
+    processTopEnabled,
   });
   updateChartHint(historyRangeMinutes);
   await refreshTempSourceStatus();
@@ -657,6 +858,8 @@ async function loadSettingsForm() {
 
 function fillSettingsFormFromApplied(applied: AppliedSettings) {
   historyRangeMinutes = normalizeHistoryRangeMinutes(applied.historyRangeMinutes);
+  processTopEnabled = !!applied.processTopEnabled;
+  setProcessTopVisible(processTopEnabled);
   updateChartHint(historyRangeMinutes);
   fillSettingsForm({
     thresholds: applied.alert,
@@ -668,7 +871,11 @@ function fillSettingsFormFromApplied(applied: AppliedSettings) {
     autostartEnabled: applied.autostartEnabled,
     overlayAutoHide: applied.overlayAutoHide,
     overlayStyle: normalizeOverlayStyle(applied.overlayStyle),
+    processTopEnabled,
   });
+  if (processTopEnabled) {
+    void refreshProcessTop(true);
+  }
 }
 
 async function setSettingsOpen(open: boolean) {
@@ -770,6 +977,7 @@ function bindSettingsUi() {
           autostartEnabled: readAutostartEnabled(),
           overlayAutoHide: readOverlayAutoHide(),
           overlayStyle: readOverlayStyle(),
+          processTopEnabled: readProcessTopEnabled(),
         },
       });
       fillSettingsFormFromApplied(applied);
@@ -811,7 +1019,12 @@ async function bootstrapHistoryHint() {
   try {
     const cfg = await invoke<AppConfig>('get_app_config');
     historyRangeMinutes = normalizeHistoryRangeMinutes(cfg.historyRangeMinutes);
+    processTopEnabled = !!cfg.processTopEnabled;
+    setProcessTopVisible(processTopEnabled);
     updateChartHint(historyRangeMinutes);
+    if (processTopEnabled) {
+      void refreshProcessTop(true);
+    }
   } catch (error) {
     console.error('加载历史时长失败', error);
     updateChartHint(1);

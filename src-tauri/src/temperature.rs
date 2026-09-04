@@ -1,5 +1,6 @@
 use crate::temperature_lhm::{
-    LhmRuntimeConfig, LibreHardwareMonitorProvider, TempSourceKind, TempSourceTracker,
+    LhmRuntimeConfig, LibreHardwareMonitorProvider, SharedGpuCache, TempSourceKind,
+    TempSourceTracker,
 };
 use std::sync::Arc;
 use sysinfo::Components;
@@ -27,15 +28,17 @@ impl ChainedTemperatureProvider {
     /// - 启用精确温度时：LHM → WMI → sysinfo
     /// - 关闭时：WMI → sysinfo（Windows 上 WMI 通常更有效）
     /// - LHM 内部读共享开关，设置页可热更新。
+    /// - GPU 仅经 LHM 同一次请求解析，写入 gpu_cache。
     pub fn platform_default(
         lhm_runtime: Arc<LhmRuntimeConfig>,
         tracker: Arc<TempSourceTracker>,
+        gpu_cache: SharedGpuCache,
     ) -> Self {
         let mut providers: Vec<(TempSourceKind, Box<dyn TemperatureProvider>)> = Vec::new();
 
         providers.push((
             TempSourceKind::Lhm,
-            Box::new(LibreHardwareMonitorProvider::new(lhm_runtime)),
+            Box::new(LibreHardwareMonitorProvider::new(lhm_runtime, gpu_cache)),
         ));
 
         #[cfg(windows)]
