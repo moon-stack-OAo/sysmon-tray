@@ -27,6 +27,7 @@ interface AppConfig {
   overlayEnabled: boolean;
   autostartEnabled: boolean;
   overlayAutoHide: boolean;
+  overlayClickThrough: boolean;
   overlayStyle: 'capsule' | 'vertical' | 'numeric';
   processTopEnabled: boolean;
   overlayX?: number | null;
@@ -765,6 +766,7 @@ interface SettingsFormValues {
   overlayEnabled?: boolean;
   autostartEnabled?: boolean;
   overlayAutoHide?: boolean;
+  overlayClickThrough?: boolean;
   overlayStyle?: 'capsule' | 'vertical' | 'numeric';
   processTopEnabled?: boolean;
 }
@@ -779,6 +781,7 @@ function fillSettingsForm(values: SettingsFormValues) {
     overlayEnabled,
     autostartEnabled,
     overlayAutoHide,
+    overlayClickThrough,
     overlayStyle,
     processTopEnabled: processTop,
   } = values;
@@ -792,6 +795,9 @@ function fillSettingsForm(values: SettingsFormValues) {
   const autostart = document.querySelector('#setting-autostart') as HTMLInputElement | null;
   const overlayAutoHideEl = document.querySelector(
     '#setting-overlay-auto-hide',
+  ) as HTMLInputElement | null;
+  const overlayClickThroughEl = document.querySelector(
+    '#setting-overlay-click-through',
   ) as HTMLInputElement | null;
   const overlayStyleEl = document.querySelector(
     '#setting-overlay-style',
@@ -817,6 +823,9 @@ function fillSettingsForm(values: SettingsFormValues) {
   }
   if (overlayAutoHideEl && overlayAutoHide !== undefined) {
     overlayAutoHideEl.checked = overlayAutoHide;
+  }
+  if (overlayClickThroughEl && overlayClickThrough !== undefined) {
+    overlayClickThroughEl.checked = overlayClickThrough;
   }
   if (overlayStyleEl && overlayStyle !== undefined) {
     overlayStyleEl.value = normalizeOverlayStyle(overlayStyle);
@@ -852,6 +861,11 @@ function readAutostartEnabled(): boolean {
 
 function readOverlayAutoHide(): boolean {
   const el = document.querySelector('#setting-overlay-auto-hide') as HTMLInputElement | null;
+  return el?.checked ?? false;
+}
+
+function readOverlayClickThrough(): boolean {
+  const el = document.querySelector('#setting-overlay-click-through') as HTMLInputElement | null;
   return el?.checked ?? false;
 }
 
@@ -932,6 +946,7 @@ interface AppliedSettings {
   overlayEnabled: boolean;
   autostartEnabled: boolean;
   overlayAutoHide: boolean;
+  overlayClickThrough: boolean;
   overlayStyle: string;
   processTopEnabled: boolean;
 }
@@ -949,6 +964,7 @@ async function loadSettingsForm() {
     overlayEnabled: cfg.overlayEnabled,
     autostartEnabled: cfg.autostartEnabled,
     overlayAutoHide: cfg.overlayAutoHide,
+    overlayClickThrough: cfg.overlayClickThrough,
     overlayStyle: normalizeOverlayStyle(cfg.overlayStyle),
     processTopEnabled,
   });
@@ -970,6 +986,7 @@ function fillSettingsFormFromApplied(applied: AppliedSettings) {
     overlayEnabled: applied.overlayEnabled,
     autostartEnabled: applied.autostartEnabled,
     overlayAutoHide: applied.overlayAutoHide,
+    overlayClickThrough: applied.overlayClickThrough,
     overlayStyle: normalizeOverlayStyle(applied.overlayStyle),
     processTopEnabled,
   });
@@ -1076,6 +1093,7 @@ function bindSettingsUi() {
           overlayEnabled: readOverlayEnabled(),
           autostartEnabled: readAutostartEnabled(),
           overlayAutoHide: readOverlayAutoHide(),
+          overlayClickThrough: readOverlayClickThrough(),
           overlayStyle: readOverlayStyle(),
           processTopEnabled: readProcessTopEnabled(),
         },

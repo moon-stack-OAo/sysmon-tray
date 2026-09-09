@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window';
 
 interface AlertStatus {
   cpu: boolean;
@@ -45,6 +46,7 @@ type OverlayStyle = 'capsule' | 'vertical' | 'numeric';
 interface AppConfig {
   overlayEnabled?: boolean;
   overlayAutoHide: boolean;
+  overlayClickThrough?: boolean;
   overlayStyle?: OverlayStyle;
   overlayEdgeX?: 'left' | 'right' | null;
   overlayEdgeY?: 'top' | 'bottom' | null;
@@ -61,8 +63,16 @@ let hideTimer: number | undefined;
 let pinnedExpanded = false;
 let pollTimer: number | undefined;
 let overlayEnabled = true;
+let clickThroughEnabled = false;
+let ignoreActive = false;
+let ignoreApplyPromise: Promise<void> | null = null;
+let clickThroughPollTimer: number | undefined;
+let clickThroughLeaveTimer: number | undefined;
+let pointerDown = false;
 
 const HIDE_DELAY_MS = 900;
+const CLICK_THROUGH_POLL_MS = 60;
+const CLICK_THROUGH_LEAVE_MS = 250;
 
 function startPolling() {
   if (pollTimer !== undefined) return;
@@ -76,6 +86,97 @@ function stopPolling() {
     window.clearInterval(pollTimer);
     pollTimer = undefined;
   }
+}
+
+function clearClickThroughLeaveTimer() {
+  if (clickThroughLeaveTimer !== undefined) {
+    window.clearTimeout(clickThroughLeaveTimer);
+    clickThroughLeaveTimer = undefined;
+  }
+}
+
+async function applyIgnoreCursorEvents(ignore: boolean) {
+  if (ignoreActive === ignore) return;
+  ignoreActive = ignore;
+  const apply = async () => {
+    try {
+      await getCurrentWindow().setIgnoreCursorEvents(ignore);
+    } catch (error) {
+      console.error('设置鼠标穿透失败', error);
+      ignoreActive = !ignore;
+    }
+  };
+  ignoreApplyPromise = (ignoreApplyPromise ?? Promise.resolve()).then(apply, apply);
+  await ignoreApplyPromise;
+}
+
+function stopClickThroughPolling() {
+  if (clickThroughPollTimer !== undefined) {
+    window.clearInterval(clickThroughPollTimer);
+    clickThroughPollTimer = undefined;
+  }
+  clearClickThroughLeaveTimer();
+}
+
+async function disableClickThroughRuntime() {
+  stopClickThroughPolling();
+  await applyIgnoreCursorEvents(false);
+}
+
+async function isCursorOverOverlay(): Promise<boolean> {
+  try {
+    const win = getCurrentWindow();
+    const [cursor, pos, size] = await Promise.all([
+      cursorPosition(),
+      win.outerPosition(),
+      win.outerSize(),
+    ]);
+    return (
+      cursor.x >= pos.x &&
+      cursor.x < pos.x + size.width &&
+      cursor.y >= pos.y &&
+      cursor.y < pos.y + size.height
+    );
+  } catch (error) {
+    console.error('读取光标/窗口位置失败', error);
+    return false;
+  }
+}
+
+async function tickClickThrough() {
+  if (!clickThroughEnabled || !overlayEnabled || resizing) return;
+  const over = await isCursorOverOverlay();
+  if (over) {
+    clearClickThroughLeaveTimer();
+    if (ignoreActive) {
+      await applyIgnoreCursorEvents(false);
+    }
+    return;
+  }
+  if (pointerDown || ignoreActive || clickThroughLeaveTimer !== undefined) return;
+  clickThroughLeaveTimer = window.setTimeout(() => {
+    clickThroughLeaveTimer = undefined;
+    if (!clickThroughEnabled || !overlayEnabled || pointerDown || resizing) return;
+    void applyIgnoreCursorEvents(true);
+  }, CLICK_THROUGH_LEAVE_MS);
+}
+
+function startClickThroughPolling() {
+  if (clickThroughPollTimer !== undefined) return;
+  clickThroughPollTimer = window.setInterval(() => {
+    void tickClickThrough();
+  }, CLICK_THROUGH_POLL_MS);
+  void tickClickThrough();
+}
+
+async function syncClickThroughRuntime() {
+  if (clickThroughEnabled && overlayEnabled) {
+    clearClickThroughLeaveTimer();
+    await applyIgnoreCursorEvents(true);
+    startClickThroughPolling();
+    return;
+  }
+  await disableClickThroughRuntime();
 }
 
 function canPeekHide(): boolean {
@@ -327,6 +428,7 @@ async function loadOverlayConfig() {
     const cfg = await invoke<AppConfig>('get_app_config');
     overlayEnabled = cfg.overlayEnabled !== false;
     autoHide = !!cfg.overlayAutoHide;
+    clickThroughEnabled = !!cfg.overlayClickThrough;
     edgeX = cfg.overlayEdgeX === 'left' || cfg.overlayEdgeX === 'right' ? cfg.overlayEdgeX : null;
     await applyOverlayStyle(normalizeStyle(cfg.overlayStyle));
     if (canPeekHide() && mode === 'collapsed') {
@@ -334,6 +436,7 @@ async function loadOverlayConfig() {
     } else if (mode === 'peek' && !canPeekHide()) {
       await setMode('collapsed');
     }
+    await syncClickThroughRuntime();
   } catch (error) {
     console.error('加载叠加层配置失败', error);
   }
@@ -524,6 +627,49 @@ async function refreshOverlay() {
   }
 }
 
+function bindWindowDrag(root: HTMLElement) {
+  const DRAG_THRESHOLD_PX = 3;
+
+  root.addEventListener('mousedown', (event) => {
+    if (event.button !== 0) return;
+    if (event.detail > 1) return;
+    const target = event.target as HTMLElement | null;
+    if (!target || target.closest('button')) return;
+
+    pointerDown = true;
+    clearClickThroughLeaveTimer();
+
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let started = false;
+
+    const onMove = (moveEvent: MouseEvent) => {
+      if (started) return;
+      if (
+        Math.abs(moveEvent.clientX - startX) < DRAG_THRESHOLD_PX &&
+        Math.abs(moveEvent.clientY - startY) < DRAG_THRESHOLD_PX
+      ) {
+        return;
+      }
+      started = true;
+      cleanup();
+      void getCurrentWindow().startDragging();
+    };
+
+    const cleanup = () => {
+      pointerDown = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', cleanup);
+      if (clickThroughEnabled && overlayEnabled) {
+        void tickClickThrough();
+      }
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', cleanup);
+  });
+}
+
 function bindCollapseUi() {
   const expandIds = ['#btn-expand', '#btn-expand-num'];
   for (const id of expandIds) {
@@ -554,7 +700,11 @@ function bindCollapseUi() {
     void setCollapsed(true);
   });
 
-  const root = document.querySelector('#overlay-root');
+  const root = document.querySelector('#overlay-root') as HTMLElement | null;
+  if (root) {
+    bindWindowDrag(root);
+  }
+
   root?.addEventListener('mouseenter', () => {
     clearHideTimer();
     if (mode === 'peek') {
@@ -597,8 +747,10 @@ window.addEventListener('DOMContentLoaded', () => {
     if (overlayEnabled) {
       startPolling();
       void refreshOverlay();
+      void syncClickThroughRuntime();
     } else {
       stopPolling();
+      void disableClickThroughRuntime();
     }
   });
 
@@ -611,6 +763,11 @@ window.addEventListener('DOMContentLoaded', () => {
     } else if (mode === 'peek') {
       void setMode('collapsed');
     }
+  });
+
+  void listen<boolean>('overlay-click-through-changed', (event) => {
+    clickThroughEnabled = !!event.payload;
+    void syncClickThroughRuntime();
   });
 
   void listen<string>('overlay-style-changed', (event) => {

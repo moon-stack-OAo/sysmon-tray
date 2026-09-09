@@ -347,6 +347,7 @@ struct SettingsInput {
     overlay_enabled: bool,
     autostart_enabled: bool,
     overlay_auto_hide: bool,
+    overlay_click_through: bool,
     overlay_style: String,
     process_top_enabled: bool,
 }
@@ -362,6 +363,7 @@ impl SettingsInput {
             overlay_enabled: false,
             autostart_enabled: false,
             overlay_auto_hide: false,
+            overlay_click_through: false,
             overlay_style: "capsule".to_string(),
             process_top_enabled: false,
         }
@@ -379,6 +381,7 @@ struct SettingsResponse {
     overlay_enabled: bool,
     autostart_enabled: bool,
     overlay_auto_hide: bool,
+    overlay_click_through: bool,
     overlay_style: String,
     process_top_enabled: bool,
 }
@@ -423,6 +426,7 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
         next.overlay_enabled = input.overlay_enabled;
         next.autostart_enabled = input.autostart_enabled;
         next.overlay_auto_hide = input.overlay_auto_hide;
+        next.overlay_click_through = input.overlay_click_through;
         next.overlay_style = parsed_style;
         next.process_top_enabled = input.process_top_enabled;
         if let Some(pos) = overlay_pos {
@@ -453,6 +457,7 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
     sync_overlay_menu_checked(app, input.overlay_enabled);
     let _ = app.emit("overlay-enabled-changed", input.overlay_enabled);
     let _ = app.emit("overlay-auto-hide-changed", input.overlay_auto_hide);
+    let _ = app.emit("overlay-click-through-changed", input.overlay_click_through);
     let _ = app.emit("overlay-style-changed", parsed_style.as_str());
 
     if input.notification_enabled {
@@ -477,6 +482,7 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
         overlay_enabled: input.overlay_enabled,
         autostart_enabled: input.autostart_enabled,
         overlay_auto_hide: input.overlay_auto_hide,
+        overlay_click_through: input.overlay_click_through,
         overlay_style: parsed_style.as_str().to_string(),
         process_top_enabled: input.process_top_enabled,
     })
@@ -779,6 +785,16 @@ fn set_overlay_auto_hide(enabled: bool, app: AppHandle) -> Result<bool, String> 
         Ok(())
     })?;
     let _ = app.emit("overlay-auto-hide-changed", enabled);
+    Ok(enabled)
+}
+
+#[tauri::command]
+fn set_overlay_click_through(enabled: bool, app: AppHandle) -> Result<bool, String> {
+    mutate_config(&app.state::<SharedConfig>(), |next| {
+        next.overlay_click_through = enabled;
+        Ok(())
+    })?;
+    let _ = app.emit("overlay-click-through-changed", enabled);
     Ok(enabled)
 }
 
@@ -1335,6 +1351,7 @@ pub fn run() {
             set_overlay_collapsed,
             set_overlay_layout,
             set_overlay_auto_hide,
+            set_overlay_click_through,
             set_overlay_style,
             set_autostart_enabled,
             apply_settings,

@@ -37,6 +37,10 @@ fn default_overlay_auto_hide() -> bool {
     false
 }
 
+fn default_overlay_click_through() -> bool {
+    false
+}
+
 fn default_overlay_style() -> OverlayStyle {
     OverlayStyle::Capsule
 }
@@ -120,6 +124,9 @@ pub struct AppConfig {
     /// 叠加层贴边后自动隐藏为热区细边条
     #[serde(default = "default_overlay_auto_hide")]
     pub overlay_auto_hide: bool,
+    /// 叠加层鼠标穿透：默认点穿桌面，光标进入热区可操作
+    #[serde(default = "default_overlay_click_through")]
+    pub overlay_click_through: bool,
     /// 叠加层收起态形态：capsule / vertical / numeric
     #[serde(default = "default_overlay_style")]
     pub overlay_style: OverlayStyle,
@@ -157,6 +164,7 @@ impl Default for AppConfig {
             overlay_enabled: default_overlay_enabled(),
             autostart_enabled: default_autostart_enabled(),
             overlay_auto_hide: default_overlay_auto_hide(),
+            overlay_click_through: default_overlay_click_through(),
             overlay_style: default_overlay_style(),
             process_top_enabled: default_process_top_enabled(),
             main_x: None,

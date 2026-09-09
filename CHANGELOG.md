@@ -6,14 +6,18 @@
 
 ## [Unreleased]
 
+## [0.1.3]
+
 ### 新增
 
 - 风扇转速：启用 LHM 时解析最多 4 路风扇（CPU / 泵 / GPU / 机箱优先）；主面板卡片与叠加层展开态展示
 - 历史曲线增加主风扇 RPM（独立转速轴）；无风扇数据时不绘制
+- 叠加层鼠标穿透：设置项 `overlayClickThrough`（默认关闭）；开启后默认点穿桌面，光标进入窗口热区可操作
 
 ### 说明
 
 - 风扇与 GPU 一样仅来自 LHM，无独立回退；不做风扇告警
+- 穿透依赖整窗外框命中轮询；拖拽中不会重新开启穿透
 
 ## [0.1.2]
 
@@ -78,7 +82,8 @@
 - NSIS 安装界面支持中英双语选择
 - Release 资源英文命名：`sysmon-tray_*_x64-setup.exe`
 
-[Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/moon-stack-OAo/sysmon-tray/releases/tag/v0.1.0
