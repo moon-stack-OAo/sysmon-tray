@@ -112,7 +112,8 @@ impl TemperatureProvider for SysinfoComponentsProvider {
 mod windows_wmi {
     use super::{is_plausible_celsius, pick_cpu_temp, TemperatureProvider};
     use serde::Deserialize;
-    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
     use std::time::Duration;
     use wmi::{COMLibrary, WMIConnection};
 
@@ -143,21 +144,32 @@ mod windows_wmi {
     /// 二者均为 ACPI 热区，不是逐核传感器；逐核需 LibreHardwareMonitor 等驱动方案。
     pub struct WindowsWmiThermalProvider {
         req_tx: Option<mpsc::SyncSender<QueryResponder>>,
+        /// COMLibrary::new 失败后不再每轮 spawn；线程退出时由 worker 置位。
+        com_unavailable: Arc<AtomicBool>,
     }
 
     impl WindowsWmiThermalProvider {
         pub fn new() -> Self {
-            Self { req_tx: None }
+            Self {
+                req_tx: None,
+                com_unavailable: Arc::new(AtomicBool::new(false)),
+            }
         }
 
         /// 常驻 worker：仅首次采样时创建（延迟初始化，避免建窗前污染 Tauri 主线程 STA）。
         /// COM 库不可跨线程传递，因此在 worker 线程内一次性 COMLibrary::new 并持有整个生命周期。
         fn spawn_worker(&mut self) -> Option<&mpsc::SyncSender<QueryResponder>> {
+            if self.com_unavailable.load(Ordering::Acquire) {
+                return None;
+            }
             let (req_tx, req_rx) = mpsc::sync_channel::<QueryResponder>(1);
+            let com_unavailable = Arc::clone(&self.com_unavailable);
             std::thread::Builder::new()
                 .name("wmi-temp-worker".into())
                 .spawn(move || {
                     let Ok(com) = COMLibrary::new() else {
+                        // 初始化失败则熔断，调用方不再每秒重建线程
+                        com_unavailable.store(true, Ordering::Release);
                         return;
                     };
                     for resp in req_rx {
@@ -171,9 +183,15 @@ mod windows_wmi {
         }
 
         /// 请求通道容量 1：try_send 失败即 worker 忙（上轮查询超时未归或挂起），
-        /// 本轮直接放弃并回退下一 Provider，绝不额外 spawn 线程；通道断开（worker panic
-        /// 或 COM 初始化失败退出）时重建一次，仍失败则视本 Provider 不可用。
+        /// 本轮直接放弃并回退下一 Provider，绝不额外 spawn 线程。
+        /// COM 初始化失败后 com_unavailable 置位，后续直接返回 None。
+        ///
+        /// 每轮使用独立 channel。超时后必须 drop resp_rx：worker 稍后 send 会失败并丢弃结果，
+        /// 不会残留到下一轮（下一轮是新的 Receiver，读不到旧队列）。
         fn query_on_worker(&mut self) -> WmiQueryResult {
+            if self.com_unavailable.load(Ordering::Acquire) {
+                return None;
+            }
             let (resp_tx, resp_rx) = mpsc::channel();
             let tx = match self.req_tx.clone() {
                 Some(tx) => tx,
@@ -183,13 +201,24 @@ mod windows_wmi {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Full(_)) => return None,
                 Err(mpsc::TrySendError::Disconnected(_)) => {
+                    self.req_tx = None;
+                    if self.com_unavailable.load(Ordering::Acquire) {
+                        return None;
+                    }
                     let tx = self.spawn_worker()?.clone();
                     if tx.try_send(resp_tx).is_err() {
                         return None;
                     }
                 }
             }
-            resp_rx.recv_timeout(QUERY_TIMEOUT).ok().flatten()
+            match resp_rx.recv_timeout(QUERY_TIMEOUT) {
+                Ok(result) => result,
+                Err(_) => {
+                    // 超时后 drop resp_rx，让 worker 的迟到 send 失败，避免调用方误存旧结果
+                    drop(resp_rx);
+                    None
+                }
+            }
         }
 
         fn query_msacpi(com: &COMLibrary) -> Option<Vec<(String, f32)>> {

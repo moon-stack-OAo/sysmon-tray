@@ -5,16 +5,18 @@ mod monitor;
 mod temperature;
 mod temperature_lhm;
 
-use alert::{AlertEngine, AlertStatus, AlertThresholds, SharedAlerts};
+use alert::{AlertEngine, AlertKind, AlertStatus, AlertThresholds, SharedAlerts};
 use config::{
     mutate_config, normalize_lhm_base_url, AppConfig, OverlayEdgeX, OverlayEdgeY, OverlayStyle,
     SharedConfig, DEFAULT_LHM_BASE_URL,
 };
 use history::{history_capacity_for_minutes, HistoryPoint};
 use monitor::{
-    sample_cached_shared, Metrics, MonitorState, ProcessTopSnapshot, SharedMonitor,
+    sample_cached_shared, sample_process_top_shared, Metrics, MonitorState, ProcessTopSnapshot,
+    SharedMonitor,
     SharedTemperature, METRICS_CACHE_MIN_INTERVAL,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{
@@ -35,8 +37,10 @@ pub type SharedOverlayMenu = Mutex<Option<CheckMenuItem<tauri::Wry>>>;
 pub struct SharedOverlayPosSave(pub Mutex<Option<Instant>>);
 pub struct SharedOverlayLastMove(pub Mutex<Option<Instant>>);
 pub struct SharedOverlaySnapQuietUntil(pub Mutex<Option<Instant>>);
+pub struct SharedOverlayPosDebounce(pub AtomicBool);
 pub struct SharedMainPosSave(pub Mutex<Option<Instant>>);
 pub struct SharedMainLastMove(pub Mutex<Option<Instant>>);
+pub struct SharedMainPosDebounce(pub AtomicBool);
 
 const OVERLAY_SNAP_THRESHOLD_PX: i32 = 36;
 const OVERLAY_SNAP_CORNER_BONUS_PX: i32 = 12;
@@ -50,7 +54,8 @@ const OVERLAY_VERTICAL_HEIGHT: u32 = 200;
 const OVERLAY_NUMERIC_WIDTH: u32 = 246;
 const OVERLAY_NUMERIC_HEIGHT: u32 = 34;
 const OVERLAY_EXPANDED_WIDTH: u32 = 310;
-const OVERLAY_EXPANDED_HEIGHT: u32 = 278;
+// 含 Swap 行与 GPU/风扇 detail：边距 8+标题 22+间距，7 行仪表与网络行约 360
+const OVERLAY_EXPANDED_HEIGHT: u32 = 360;
 const OVERLAY_PEEK_THICKNESS: u32 = 8;
 const OVERLAY_PEEK_LENGTH: u32 = 96;
 
@@ -91,24 +96,32 @@ fn ensure_notification_permission(app: &tauri::AppHandle) -> bool {
     }
 }
 
-fn send_alert_notification(app: &tauri::AppHandle, newly_fired: &[String]) {
+fn send_alert_notification(app: &tauri::AppHandle, newly_fired: &[(AlertKind, String)]) -> bool {
     if newly_fired.is_empty() {
-        return;
+        return false;
     }
     if !ensure_notification_permission(app) {
         eprintln!("系统通知权限未授予，跳过告警通知");
-        return;
+        return false;
     }
-    let body = newly_fired.join(" · ");
-    // 通知失败不影响采样主路径
-    if let Err(err) = app
+    let body = newly_fired
+        .iter()
+        .map(|(_, msg)| msg.as_str())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    // 通知失败不影响采样主路径；只有 show 成功才允许调用方记账冷却
+    match app
         .notification()
         .builder()
         .title("系统监测告警")
         .body(&body)
         .show()
     {
-        eprintln!("发送系统通知失败: {err}");
+        Ok(()) => true,
+        Err(err) => {
+            eprintln!("发送系统通知失败: {err}");
+            false
+        }
     }
 }
 
@@ -163,8 +176,11 @@ fn get_metrics(
         cfg.notification_enabled
     };
 
-    if notification_enabled {
-        send_alert_notification(&app, &newly_fired);
+    // 通知关闭或 show 失败都不记账，打开通知后下一次超阈值仍会响
+    if notification_enabled && send_alert_notification(&app, &newly_fired) {
+        let kinds: Vec<AlertKind> = newly_fired.iter().map(|(kind, _)| *kind).collect();
+        let mut engine = alerts.lock().map_err(|e| e.to_string())?;
+        engine.mark_fired(&kinds);
     }
 
     if let Some(tray) = app.tray_by_id("main") {
@@ -195,8 +211,7 @@ fn get_process_top(
         let cfg = config.lock().map_err(|e| e.to_string())?;
         cfg.process_top_enabled
     };
-    let mut state = monitor.lock().map_err(|e| e.to_string())?;
-    Ok(state.sample_process_top_cached(enabled))
+    sample_process_top_shared(&monitor, enabled)
 }
 
 #[tauri::command]
@@ -400,7 +415,7 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
     let parsed_style =
         OverlayStyle::parse(&input.overlay_style).ok_or_else(|| "无效的叠加层形态".to_string())?;
 
-    // 可失败的外部系统操作先于任何内存修改与落盘
+    // 外部可失败操作（通知权限、自启）在落盘前；落盘后的内存副作用失败只打日志
     if input.notification_enabled && !ensure_notification_permission(app) {
         return Err("系统通知权限未授予，请在 Windows 通知设置中允许本应用".to_string());
     }
@@ -436,15 +451,14 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
         Ok(())
     })?;
 
-    // 提交成功后的副作用，尽力而为不阻断
-    {
-        let mut engine = alerts.lock().map_err(|e| e.to_string())?;
-        engine.set_thresholds(input.thresholds.clone());
+    match alerts.lock() {
+        Ok(mut engine) => engine.set_thresholds(input.thresholds.clone()),
+        Err(err) => eprintln!("更新告警阈值失败: {err}"),
     }
-    monitor
-        .lock()
-        .map_err(|e| e.to_string())?
-        .set_history_capacity(capacity);
+    match monitor.lock() {
+        Ok(mut state) => state.set_history_capacity(capacity),
+        Err(err) => eprintln!("更新历史容量失败: {err}"),
+    }
 
     lhm.set_enabled(input.precise_temp_enabled);
     lhm.set_base_url(normalized_lhm.clone());
@@ -842,6 +856,21 @@ fn restore_overlay_position(window: &tauri::WebviewWindow, cfg: &AppConfig) {
     }
 }
 
+fn persist_overlay_xy_keeping_edge(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("overlay") else {
+        return;
+    };
+    let Ok(pos) = window.outer_position() else {
+        return;
+    };
+    let (edge_x, edge_y) = app
+        .state::<SharedConfig>()
+        .lock()
+        .map(|cfg| (cfg.overlay_edge_x, cfg.overlay_edge_y))
+        .unwrap_or((None, None));
+    persist_overlay_position(app, pos.x, pos.y, edge_x, edge_y);
+}
+
 fn persist_overlay_position(
     app: &AppHandle,
     x: i32,
@@ -995,6 +1024,18 @@ fn schedule_overlay_position_save(app: &AppHandle) {
             cfg.overlay_x = Some(pos.x);
             cfg.overlay_y = Some(pos.y);
         }
+        let now = Instant::now();
+        if let Ok(mut last) = app.state::<SharedOverlayLastMove>().0.lock() {
+            *last = Some(now);
+        }
+        let debounce = app.state::<SharedOverlayPosDebounce>();
+        if debounce
+            .0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            spawn_overlay_position_worker(app.clone());
+        }
         return;
     }
 
@@ -1008,37 +1049,96 @@ fn schedule_overlay_position_save(app: &AppHandle) {
         *last = Some(now);
     }
 
-    let app_handle = app.clone();
+    let debounce = app.state::<SharedOverlayPosDebounce>();
+    if debounce
+        .0
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    spawn_overlay_position_worker(app.clone());
+}
+
+fn spawn_overlay_position_worker(app_handle: AppHandle) {
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(OVERLAY_SNAP_DEBOUNCE_MS));
-        let still = app_handle
+        loop {
+            std::thread::sleep(Duration::from_millis(OVERLAY_SNAP_DEBOUNCE_MS));
+            let observed = app_handle
+                .state::<SharedOverlayLastMove>()
+                .0
+                .lock()
+                .ok()
+                .and_then(|guard| *guard);
+            let settled = observed
+                .map(|t| {
+                    Instant::now().duration_since(t)
+                        >= Duration::from_millis(OVERLAY_SNAP_DEBOUNCE_MS - 20)
+                })
+                .unwrap_or(false);
+            if !settled {
+                continue;
+            }
+
+            let now = Instant::now();
+            let should_write = {
+                let state = app_handle.state::<SharedOverlayPosSave>();
+                let Ok(mut last) = state.0.lock() else {
+                    break;
+                };
+                let due = last
+                    .map(|t| now.duration_since(t) >= Duration::from_millis(200))
+                    .unwrap_or(true);
+                if due {
+                    *last = Some(now);
+                }
+                due
+            };
+            let still_quiet = app_handle
+                .state::<SharedOverlaySnapQuietUntil>()
+                .0
+                .lock()
+                .ok()
+                .and_then(|quiet| *quiet)
+                .map(|t| Instant::now() < t)
+                .unwrap_or(false);
+            if should_write {
+                if still_quiet {
+                    persist_overlay_xy_keeping_edge(&app_handle);
+                } else {
+                    apply_overlay_snap_and_persist(&app_handle);
+                }
+            }
+
+            let moved_again = app_handle
+                .state::<SharedOverlayLastMove>()
+                .0
+                .lock()
+                .ok()
+                .and_then(|guard| *guard)
+                != observed;
+            // quiet 未结束前不退出：否则只落盘一次后 worker 放锁，期间 hide 会丢掉后续坐标
+            if moved_again || still_quiet {
+                continue;
+            }
+            break;
+        }
+        app_handle
+            .state::<SharedOverlayPosDebounce>()
+            .0
+            .store(false, Ordering::Release);
+        // 释放期间若又有 Moved，仅更新了时间戳而未拉起 worker，补一次调度
+        let needs_rearm = app_handle
             .state::<SharedOverlayLastMove>()
             .0
             .lock()
             .ok()
             .and_then(|guard| *guard)
-            .map(|t| Instant::now().duration_since(t) >= Duration::from_millis(OVERLAY_SNAP_DEBOUNCE_MS - 20))
+            .map(|t| Instant::now().duration_since(t) < Duration::from_millis(OVERLAY_SNAP_DEBOUNCE_MS))
             .unwrap_or(false);
-        if !still {
-            return;
-        }
-
-        let now = Instant::now();
-        let should_write = {
-            let state = app_handle.state::<SharedOverlayPosSave>();
-            let Ok(mut last) = state.0.lock() else {
-                return;
-            };
-            let due = last
-                .map(|t| now.duration_since(t) >= Duration::from_millis(200))
-                .unwrap_or(true);
-            if due {
-                *last = Some(now);
-            }
-            due
-        };
-        if should_write {
-            apply_overlay_snap_and_persist(&app_handle);
+        if needs_rearm {
+            schedule_overlay_position_save(&app_handle);
         }
     });
 }
@@ -1096,12 +1196,42 @@ fn persist_main_position(app: &AppHandle, x: i32, y: i32) {
     });
 }
 
-fn restore_main_position(window: &tauri::WebviewWindow, cfg: &AppConfig) -> bool {
-    if let (Some(x), Some(y)) = (cfg.main_x, cfg.main_y) {
-        let _ = window.set_position(PhysicalPosition::new(x, y));
-        return true;
+fn clamp_to_work_area(x: i32, y: i32, win_w: i32, win_h: i32, monitor: &Monitor) -> (i32, i32) {
+    let work = monitor.work_area();
+    let left = work.position.x;
+    let top = work.position.y;
+    let right = work.position.x.saturating_add(work.size.width as i32);
+    let bottom = work.position.y.saturating_add(work.size.height as i32);
+    let max_x = (right - win_w).max(left);
+    let max_y = (bottom - win_h).max(top);
+    (x.clamp(left, max_x), y.clamp(top, max_y))
+}
+
+fn restore_main_position(
+    app: &AppHandle,
+    window: &tauri::WebviewWindow,
+    cfg: &AppConfig,
+    tray_rect: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
+) -> bool {
+    let (Some(x), Some(y)) = (cfg.main_x, cfg.main_y) else {
+        return false;
+    };
+    let win_size = window.outer_size().unwrap_or(PhysicalSize::new(380, 690));
+    let win_w = win_size.width as i32;
+    let win_h = win_size.height as i32;
+    let monitor = monitor_at_physical_point(window, x, y).or_else(|| {
+        tray_rect.and_then(|(pos, _)| monitor_at_physical_point(window, pos.x, pos.y))
+    });
+    let (cx, cy) = if let Some(monitor) = monitor {
+        clamp_to_work_area(x, y, win_w, win_h, &monitor)
+    } else {
+        (x.max(0), y.max(0))
+    };
+    let _ = window.set_position(PhysicalPosition::new(cx, cy));
+    if cx != x || cy != y {
+        persist_main_position(app, cx, cy);
     }
-    false
+    true
 }
 
 fn schedule_main_position_save(app: &AppHandle) {
@@ -1117,52 +1247,89 @@ fn schedule_main_position_save(app: &AppHandle) {
         cfg.main_y = Some(pos.y);
     }
 
-    // 双重节流：LastMove 去抖（拖动中线程静默退出，仅最后一次落盘）+ PosSave 限制最小写盘间隔
+    // 双重节流：单 worker 去抖（Moved 风暴时不重复 spawn）+ PosSave 限制最小写盘间隔
     let now = Instant::now();
     if let Ok(mut last) = app.state::<SharedMainLastMove>().0.lock() {
         *last = Some(now);
     }
 
+    let debounce = app.state::<SharedMainPosDebounce>();
+    if debounce
+        .0
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
     let app_handle = app.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(MAIN_POS_SAVE_DEBOUNCE_MS));
-        let still = app_handle
+        loop {
+            std::thread::sleep(Duration::from_millis(MAIN_POS_SAVE_DEBOUNCE_MS));
+            let observed = app_handle
+                .state::<SharedMainLastMove>()
+                .0
+                .lock()
+                .ok()
+                .and_then(|guard| *guard);
+            let settled = observed
+                .map(|t| {
+                    Instant::now().duration_since(t)
+                        >= Duration::from_millis(MAIN_POS_SAVE_DEBOUNCE_MS - 20)
+                })
+                .unwrap_or(false);
+            if !settled {
+                continue;
+            }
+
+            let now = Instant::now();
+            let should_write = {
+                let state = app_handle.state::<SharedMainPosSave>();
+                let Ok(mut last) = state.0.lock() else {
+                    break;
+                };
+                let due = last
+                    .map(|t| now.duration_since(t) >= Duration::from_millis(200))
+                    .unwrap_or(true);
+                if due {
+                    *last = Some(now);
+                }
+                due
+            };
+            if should_write {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    if let Ok(pos) = window.outer_position() {
+                        persist_main_position(&app_handle, pos.x, pos.y);
+                    }
+                }
+            }
+
+            let moved_again = app_handle
+                .state::<SharedMainLastMove>()
+                .0
+                .lock()
+                .ok()
+                .and_then(|guard| *guard)
+                != observed;
+            if moved_again {
+                continue;
+            }
+            break;
+        }
+        app_handle
+            .state::<SharedMainPosDebounce>()
+            .0
+            .store(false, Ordering::Release);
+        let needs_rearm = app_handle
             .state::<SharedMainLastMove>()
             .0
             .lock()
             .ok()
             .and_then(|guard| *guard)
-            .map(|t| {
-                Instant::now().duration_since(t)
-                    >= Duration::from_millis(MAIN_POS_SAVE_DEBOUNCE_MS - 20)
-            })
+            .map(|t| Instant::now().duration_since(t) < Duration::from_millis(MAIN_POS_SAVE_DEBOUNCE_MS))
             .unwrap_or(false);
-        if !still {
-            return;
-        }
-
-        let now = Instant::now();
-        let should_write = {
-            let state = app_handle.state::<SharedMainPosSave>();
-            let Ok(mut last) = state.0.lock() else {
-                return;
-            };
-            let due = last
-                .map(|t| now.duration_since(t) >= Duration::from_millis(200))
-                .unwrap_or(true);
-            if due {
-                *last = Some(now);
-            }
-            due
-        };
-        if should_write {
-            let Some(window) = app_handle.get_webview_window("main") else {
-                return;
-            };
-            let Ok(pos) = window.outer_position() else {
-                return;
-            };
-            persist_main_position(&app_handle, pos.x, pos.y);
+        if needs_rearm {
+            schedule_main_position_save(&app_handle);
         }
     });
 }
@@ -1225,7 +1392,7 @@ fn show_panel(app: &tauri::AppHandle, tray_rect: Option<(PhysicalPosition<i32>, 
         let restored = app
             .state::<SharedConfig>()
             .lock()
-            .map(|cfg| restore_main_position(&window, &cfg))
+            .map(|cfg| restore_main_position(app, &window, &cfg, tray_rect))
             .unwrap_or(false);
 
         if !restored {
@@ -1237,15 +1404,7 @@ fn show_panel(app: &tauri::AppHandle, tray_rect: Option<(PhysicalPosition<i32>, 
                 let mut y = pos.y.saturating_sub(win_h + 8);
                 // 以托盘所在显示器工作区收拢，避免顶部任务栏遮挡或负坐标屏外落位
                 if let Some(monitor) = monitor_at_physical_point(&window, pos.x, pos.y) {
-                    let work = monitor.work_area();
-                    let left = work.position.x;
-                    let top = work.position.y;
-                    let right = work.position.x.saturating_add(work.size.width as i32);
-                    let bottom = work.position.y.saturating_add(work.size.height as i32);
-                    let max_x = (right - win_w).max(left);
-                    let max_y = (bottom - win_h).max(top);
-                    x = x.clamp(left, max_x);
-                    y = y.clamp(top, max_y);
+                    (x, y) = clamp_to_work_area(x, y, win_w, win_h, &monitor);
                 } else {
                     x = x.max(0);
                     y = y.max(0);
@@ -1313,7 +1472,6 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_panel(app, None);
         }))
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .manage(
@@ -1327,8 +1485,10 @@ pub fn run() {
         .manage(SharedOverlayPosSave(Mutex::new(None)))
         .manage(SharedOverlayLastMove(Mutex::new(None)))
         .manage(SharedOverlaySnapQuietUntil(Mutex::new(None)))
+        .manage(SharedOverlayPosDebounce(AtomicBool::new(false)))
         .manage(SharedMainPosSave(Mutex::new(None)))
         .manage(SharedMainLastMove(Mutex::new(None)))
+        .manage(SharedMainPosDebounce(AtomicBool::new(false)))
         .manage(lhm_runtime as SharedLhmRuntime)
         .manage(temp_tracker as SharedTempTracker)
         .manage(lhm_extras)

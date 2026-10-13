@@ -2,7 +2,7 @@
 
 基于 **Tauri 2** 的 Windows 托盘常驻轻量系统监测工具。左键弹出无边框迷你面板，可选桌面叠加层；实时显示 CPU / 内存 / 网络 / 磁盘与 CPU 温度，支持阈值告警、系统通知、历史曲线与配置持久化。
 
-当前版本：`0.1.1` · 标识符：`com.sysmon.tray` · 产品名：`SysMon`
+当前版本：`0.1.4` · 标识符：`com.sysmon.tray` · 产品名：`SysMon`
 
 ## 功能
 
@@ -17,8 +17,8 @@
 ### 桌面叠加层
 
 - 可选启用，默认关闭；托盘菜单与设置页双向同步
-- 收起 `310×38`：CPU / 内存 / 温度 / 上下行网速
-- 展开 `310×176`：带进度条的详情视图
+- 收起：胶囊 `378×38`、竖条 `76×200`、数值条 `246×34`
+- 展开 `310×360`：CPU / 内存 / Swap / GPU / 风扇 / 温度 / 网速；贴边自动隐藏热区 `8×96`
 - 可拖拽、双击展开/收起；拖动后吸附屏幕边缘，位置写入配置
 - 失焦不隐藏；关闭叠加层窗口会关闭该功能（不退出应用）
 
@@ -138,7 +138,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-或在 Actions 页手动运行 **Release** 工作流。成功后会生成 Draft Release，可下载 Windows 安装包与便携 exe。
+或在 Actions 页手动运行 **Release** 工作流。tag 去掉 `v` 后必须与三处版本号一致。成功后直接发布（非 Draft），可下载 Windows 安装包与便携 exe。
 
 ### 应用图标
 
@@ -181,7 +181,7 @@ sysmon-tray/
 ## 温度说明
 
 1. Provider 顺序：**LibreHardwareMonitor → WMI → sysinfo Components**，失败自动回退。
-2. LHM 默认关闭；开启后请求本机 Web Server（默认 `http://127.0.0.1:8085/data.json`），仅允许 localhost，超时与连续失败会熔断。
+2. LHM 默认关闭；开启后请求本机 Web Server（默认 `http://127.0.0.1:8085/data.json`），仅允许 `127.0.0.1` / `[::1]`，不跟随重定向，超时与连续失败会熔断。
 3. WMI / sysinfo 读取的是 **ACPI 热区温度**，不是逐核传感器精确值；LHM 通常更接近 CPU Package / Tctl 等读数。
 4. 应用不捆绑硬件驱动；使用精确温度需本机运行 LibreHardwareMonitor 并开启 Remote Web Server。
 5. 读不到时前端显示「温度：暂不可用」，历史图不绘制温度曲线。

@@ -51,14 +51,21 @@ jobs:
             throw "版本不一致：package.json=$version, tauri.conf.json=$tauriVersion"
           }
 
-          $cargoLine = Select-String -LiteralPath "src-tauri/Cargo.toml" -Pattern '^\s*version\s*=\s*"([^"]+)"' |
-            Select-Object -First 1
-          if (-not $cargoLine) {
-            throw "无法从 src-tauri/Cargo.toml 读取 version"
+          $cargoText = Get-Content -Raw -LiteralPath "src-tauri/Cargo.toml"
+          $cargoMatch = [regex]::Match($cargoText, '(?ms)^\[package\]\s.*?^\s*version\s*=\s*"([^"]+)"')
+          if (-not $cargoMatch.Success) {
+            throw "无法从 src-tauri/Cargo.toml 的 [package] 读取 version"
           }
-          $cargoVersion = $cargoLine.Matches[0].Groups[1].Value
+          $cargoVersion = $cargoMatch.Groups[1].Value
           if ($cargoVersion -ne $version) {
             throw "版本不一致：package.json=$version, Cargo.toml=$cargoVersion"
+          }
+
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $tag = [string]$env:GITHUB_REF_NAME
+            if ($tag -ne "v$version") {
+              throw "tag $tag 与版本 v$version 不一致"
+            }
           }
 
           $changelog = Get-Content -Raw -LiteralPath "CHANGELOG.md"
@@ -70,8 +77,8 @@ jobs:
           $builder = New-Object System.Text.StringBuilder
           [void]$builder.AppendLine("## 下载")
           [void]$builder.AppendLine("")
-          [void]$builder.AppendLine("- Windows 安装包（NSIS）：``sysmon-tray_*_x64-setup.exe``")
-          [void]$builder.AppendLine("- 便携版：``sysmon-tray.exe``")
+          [void]$builder.AppendLine("- Windows 安装包（NSIS）：``sysmon-tray-setup.exe``")
+          [void]$builder.AppendLine("- 便携版：``sysmon-tray-portable.exe``")
           [void]$builder.AppendLine("")
 
           if ($match.Success) {
@@ -111,14 +118,30 @@ jobs:
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
-          releaseAssetNamePattern: '[mainBinaryName]_[version]_[arch][setup].[ext]'
-          uploadPlainBinary: true
+          releaseAssetNamePattern: '[mainBinaryName]-setup.[ext]'
+          uploadPlainBinary: false
+
+      - name: Rename and upload release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ steps.notes.outputs.version }}"
+          $tag = "v$version"
+          $portable = "src-tauri/target/release/sysmon-tray.exe"
+          $setup = Get-ChildItem "src-tauri/target/release/bundle/nsis/*.exe" | Select-Object -First 1
+          if (-not (Test-Path -LiteralPath $portable)) { throw "缺少便携版 exe" }
+          if (-not $setup) { throw "缺少 NSIS 安装包" }
+          Copy-Item -LiteralPath $portable -Destination "sysmon-tray-portable.exe" -Force
+          Copy-Item -LiteralPath $setup.FullName -Destination "sysmon-tray-setup.exe" -Force
+          gh release upload $tag "sysmon-tray-setup.exe" "sysmon-tray-portable.exe" --clobber
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: sysmon-tray-windows
           path: |
-            src-tauri/target/release/sysmon-tray.exe
-            src-tauri/target/release/bundle/nsis/*.exe
-          if-no-files-found: warn
+            sysmon-tray-portable.exe
+            sysmon-tray-setup.exe
+          if-no-files-found: error

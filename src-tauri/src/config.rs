@@ -266,7 +266,7 @@ fn backup_path_of(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// 校验并规范化 LHM 根 URL：仅允许本机 http(s)，防 SSRF。
+/// 校验并规范化 LHM 根 URL：仅允许本机 http，不支持 https。主机只接受 127.0.0.1 与 [::1]。
 pub fn normalize_lhm_base_url(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -302,12 +302,10 @@ pub fn normalize_lhm_base_url(raw: &str) -> Result<String, String> {
         authority.split(':').next().unwrap_or(authority)
     };
 
-    let host_ok = host.eq_ignore_ascii_case("localhost")
-        || host == "127.0.0.1"
-        || host == "[::1]"
-        || host == "::1";
+    // 不用 localhost：Windows hosts 可把它指到非回环地址
+    let host_ok = host == "127.0.0.1" || host == "[::1]" || host == "::1";
     if !host_ok {
-        return Err("出于安全，仅允许 localhost / 127.0.0.1".to_string());
+        return Err("出于安全，仅允许 127.0.0.1 / [::1]".to_string());
     }
 
     // 端口可选；路径部分丢弃，统一为根 URL
@@ -333,8 +331,11 @@ pub fn normalize_lhm_base_url(raw: &str) -> Result<String, String> {
     Ok(format!("http://{host_out}{port_part}"))
 }
 
-/// 副本事务：锁内克隆副本、修改并落盘，save 成功才提交回内存；
-/// 校验或落盘任一失败则内存与磁盘均保持原状
+/// 串行化本进程配置写盘。锁顺序永远先 IO 后 config，避免持配置锁时 sync_all 堵住采样。
+static CONFIG_IO: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 副本事务：锁内只改副本；落盘在配置锁外，由 IO 锁串行。
+/// 校验或落盘任一失败则内存与磁盘均保持原状。
 pub fn mutate_config<F>(config: &SharedConfig, mutate: F) -> Result<(), String>
 where
     F: FnOnce(&mut AppConfig) -> Result<(), String>,
@@ -347,10 +348,15 @@ fn mutate_config_to<F>(path: &Path, config: &SharedConfig, mutate: F) -> Result<
 where
     F: FnOnce(&mut AppConfig) -> Result<(), String>,
 {
-    let mut cfg = config.lock().map_err(|e| e.to_string())?;
-    let mut next = cfg.clone();
-    mutate(&mut next)?;
+    let _io = CONFIG_IO.lock().map_err(|e| e.to_string())?;
+    let next = {
+        let cfg = config.lock().map_err(|e| e.to_string())?;
+        let mut next = cfg.clone();
+        mutate(&mut next)?;
+        next
+    };
     next.save_to_path(path)?;
+    let mut cfg = config.lock().map_err(|e| e.to_string())?;
     *cfg = next;
     Ok(())
 }
@@ -362,14 +368,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_localhost() {
+    fn accepts_loopback_ip() {
         assert_eq!(
             normalize_lhm_base_url("http://127.0.0.1:8085").unwrap(),
             "http://127.0.0.1:8085"
         );
         assert_eq!(
-            normalize_lhm_base_url("http://localhost:8085/").unwrap(),
-            "http://localhost:8085"
+            normalize_lhm_base_url("http://[::1]:8085/").unwrap(),
+            "http://[::1]:8085"
         );
     }
 
@@ -378,6 +384,7 @@ mod tests {
         assert!(normalize_lhm_base_url("http://192.168.1.1:8085").is_err());
         assert!(normalize_lhm_base_url("https://127.0.0.1:8085").is_err());
         assert!(normalize_lhm_base_url("http://evil.com").is_err());
+        assert!(normalize_lhm_base_url("http://localhost:8085").is_err());
     }
 
     fn test_dir(name: &str) -> PathBuf {

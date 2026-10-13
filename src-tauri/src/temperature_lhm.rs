@@ -12,6 +12,7 @@ use ureq::Agent;
 
 const MAX_DISPLAY_FANS: usize = 4;
 const MAX_FAN_RPM: f32 = 20_000.0;
+const MAX_LHM_TREE_DEPTH: usize = 64;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(150);
 const CIRCUIT_FAIL_THRESHOLD: u32 = 5;
@@ -158,6 +159,7 @@ impl LibreHardwareMonitorProvider {
     pub fn new(runtime: Arc<LhmRuntimeConfig>, lhm_extras: SharedLhmExtras) -> Self {
         let agent: Agent = Agent::config_builder()
             .timeout_global(Some(REQUEST_TIMEOUT))
+            .max_redirects(0)
             .http_status_as_error(true)
             .build()
             .into();
@@ -243,14 +245,21 @@ impl TemperatureProvider for LibreHardwareMonitorProvider {
 
         let url = Self::data_url(&self.runtime.base_url());
         match self.fetch_and_parse(&url) {
-            Some(parsed) => {
-                self.record_success();
-                self.store_extras_cache(LhmExtras {
-                    gpu: parsed.gpu,
-                    fans: parsed.fans,
-                });
-                parsed.cpu_temp
-            }
+            Some(parsed) => match parsed.cpu_temp {
+                Some(temp) => {
+                    self.record_success();
+                    self.store_extras_cache(LhmExtras {
+                        gpu: parsed.gpu,
+                        fans: parsed.fans,
+                    });
+                    Some(temp)
+                }
+                // 服务可达但没有 CPU 温度：不记成功也不记失败，清空 extras 以免回退帧沿用 GPU/风扇
+                None => {
+                    self.clear_extras_cache();
+                    None
+                }
+            },
             None => {
                 self.record_failure();
                 self.clear_extras_cache();
@@ -282,9 +291,9 @@ struct LhmNode {
 }
 
 fn extract_lhm_metrics(root: &Value) -> LhmParseResult {
-    if let Ok(node) = serde_json::from_value::<LhmNode>(root.clone()) {
+    if let Ok(node) = LhmNode::deserialize(root) {
         let mut temp_readings = Vec::new();
-        collect_temp_readings(&node, &mut temp_readings);
+        collect_temp_readings(&node, 0, &mut temp_readings);
         let cpu_temp = pick_cpu_temp(&temp_readings);
         let gpu = pick_primary_gpu(collect_gpu_candidates(&node));
         let fans = pick_display_fans(collect_fan_candidates(&node));
@@ -296,7 +305,7 @@ fn extract_lhm_metrics(root: &Value) -> LhmParseResult {
     }
 
     let mut temp_readings = Vec::new();
-    collect_temp_from_value(root, &mut temp_readings);
+    collect_temp_from_value(root, 0, &mut temp_readings);
     LhmParseResult {
         cpu_temp: pick_cpu_temp(&temp_readings),
         gpu: None,
@@ -304,7 +313,11 @@ fn extract_lhm_metrics(root: &Value) -> LhmParseResult {
     }
 }
 
-fn collect_temp_readings(node: &LhmNode, out: &mut Vec<(String, f32)>) {
+fn collect_temp_readings(node: &LhmNode, depth: usize, out: &mut Vec<(String, f32)>) {
+    if depth > MAX_LHM_TREE_DEPTH {
+        return;
+    }
+
     let is_temp = node
         .sensor_type
         .as_deref()
@@ -323,12 +336,16 @@ fn collect_temp_readings(node: &LhmNode, out: &mut Vec<(String, f32)>) {
 
     if let Some(children) = &node.children {
         for child in children {
-            collect_temp_readings(child, out);
+            collect_temp_readings(child, depth + 1, out);
         }
     }
 }
 
-fn collect_temp_from_value(value: &Value, out: &mut Vec<(String, f32)>) {
+fn collect_temp_from_value(value: &Value, depth: usize, out: &mut Vec<(String, f32)>) {
+    if depth > MAX_LHM_TREE_DEPTH {
+        return;
+    }
+
     match value {
         Value::Object(map) => {
             let sensor_type = map
@@ -347,13 +364,13 @@ fn collect_temp_from_value(value: &Value, out: &mut Vec<(String, f32)>) {
             }
             if let Some(children) = map.get("Children").and_then(|v| v.as_array()) {
                 for child in children {
-                    collect_temp_from_value(child, out);
+                    collect_temp_from_value(child, depth + 1, out);
                 }
             }
         }
         Value::Array(arr) => {
             for item in arr {
-                collect_temp_from_value(item, out);
+                collect_temp_from_value(item, depth + 1, out);
             }
         }
         _ => {}
@@ -378,6 +395,13 @@ fn collect_gpu_candidates(root: &LhmNode) -> Vec<GpuCandidate> {
 }
 
 fn walk_for_gpu(node: &LhmNode, out: &mut Vec<GpuCandidate>) {
+    walk_for_gpu_at(node, 0, out);
+}
+
+fn walk_for_gpu_at(node: &LhmNode, depth: usize, out: &mut Vec<GpuCandidate>) {
+    if depth > MAX_LHM_TREE_DEPTH {
+        return;
+    }
     if is_gpu_hardware(node) {
         if let Some(candidate) = parse_gpu_hardware(node) {
             out.push(candidate);
@@ -386,7 +410,7 @@ fn walk_for_gpu(node: &LhmNode, out: &mut Vec<GpuCandidate>) {
     }
     if let Some(children) = &node.children {
         for child in children {
-            walk_for_gpu(child, out);
+            walk_for_gpu_at(child, depth + 1, out);
         }
     }
 }
@@ -488,6 +512,13 @@ fn parse_gpu_hardware(node: &LhmNode) -> Option<GpuCandidate> {
 }
 
 fn collect_gpu_sensors(nodes: &[LhmNode], candidate: &mut GpuCandidate) {
+    collect_gpu_sensors_at(nodes, 0, candidate);
+}
+
+fn collect_gpu_sensors_at(nodes: &[LhmNode], depth: usize, candidate: &mut GpuCandidate) {
+    if depth > MAX_LHM_TREE_DEPTH {
+        return;
+    }
     for node in nodes {
         let sensor_type = node.sensor_type.as_deref().unwrap_or("");
         let text = node.text.as_deref().unwrap_or("");
@@ -542,7 +573,7 @@ fn collect_gpu_sensors(nodes: &[LhmNode], candidate: &mut GpuCandidate) {
         }
 
         if let Some(children) = &node.children {
-            collect_gpu_sensors(children, candidate);
+            collect_gpu_sensors_at(children, depth + 1, candidate);
         }
     }
 }
@@ -672,11 +703,15 @@ fn display_fan_label(kind: &str, raw_name: &str) -> String {
 
 fn collect_fan_candidates(root: &LhmNode) -> Vec<FanCandidate> {
     let mut out = Vec::new();
-    walk_for_fans(root, "", &mut out);
+    walk_for_fans(root, "", 0, &mut out);
     out
 }
 
-fn walk_for_fans(node: &LhmNode, ancestor: &str, out: &mut Vec<FanCandidate>) {
+fn walk_for_fans(node: &LhmNode, ancestor: &str, depth: usize, out: &mut Vec<FanCandidate>) {
+    if depth > MAX_LHM_TREE_DEPTH {
+        return;
+    }
+
     let text = node.text.as_deref().unwrap_or("").trim();
     let next_ancestor = if text.is_empty() {
         ancestor.to_string()
@@ -692,7 +727,7 @@ fn walk_for_fans(node: &LhmNode, ancestor: &str, out: &mut Vec<FanCandidate>) {
 
     if let Some(children) = &node.children {
         for child in children {
-            walk_for_fans(child, &next_ancestor, out);
+            walk_for_fans(child, &next_ancestor, depth + 1, out);
         }
     }
 }

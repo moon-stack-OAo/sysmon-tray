@@ -8,41 +8,41 @@
     <script type="module" src="/src/overlay.ts" defer></script>
   </head>
   <body>
-    <main id="overlay-root" class="overlay collapsed" data-tauri-drag-region>
-      <div id="peek-bar" class="peek-bar" data-tauri-drag-region title="移入展开"></div>
+     <main id="overlay-root" class="overlay collapsed">
+      <div id="peek-bar" class="peek-bar" title="移入展开"></div>
 
-      <div class="strip" data-tauri-drag-region>
+      <div class="strip">
         <span id="strip-alert" class="strip-dot danger" hidden></span>
 
-        <span class="strip-metric" data-metric="cpu" data-tauri-drag-region>
+        <span class="strip-metric" data-metric="cpu">
           <span class="strip-dot" id="strip-cpu-dot"></span>
           <span class="strip-k">CPU</span>
           <span id="strip-cpu" class="strip-v">--%</span>
         </span>
-        <span class="strip-sep" data-tauri-drag-region></span>
+        <span class="strip-sep"></span>
 
-        <span class="strip-metric" data-metric="mem" data-tauri-drag-region>
+        <span class="strip-metric" data-metric="mem">
           <span class="strip-dot" id="strip-mem-dot"></span>
           <span class="strip-k">内存</span>
           <span id="strip-mem" class="strip-v">--%</span>
         </span>
-        <span class="strip-sep" data-tauri-drag-region></span>
+        <span class="strip-sep"></span>
 
-        <span class="strip-metric" data-metric="temp" data-tauri-drag-region>
+        <span class="strip-metric" data-metric="temp">
           <span class="strip-dot" id="strip-temp-dot"></span>
           <span class="strip-k">温度</span>
           <span id="strip-temp" class="strip-v">--</span>
         </span>
-        <span class="strip-sep" data-tauri-drag-region></span>
+        <span class="strip-sep"></span>
 
-        <span class="strip-metric" data-metric="gpu" data-tauri-drag-region>
+        <span class="strip-metric" data-metric="gpu">
           <span class="strip-dot" id="strip-gpu-dot"></span>
           <span class="strip-k">GPU</span>
           <span id="strip-gpu" class="strip-v">--</span>
         </span>
-        <span class="strip-sep" data-tauri-drag-region></span>
+        <span class="strip-sep"></span>
 
-        <span class="strip-metric strip-net" data-tauri-drag-region>
+        <span class="strip-metric strip-net">
           <span class="strip-k accent">↓</span>
           <span id="strip-net-down" class="strip-v">--</span>
           <span class="strip-k accent">↑</span>
@@ -54,7 +54,7 @@
         </button>
       </div>
 
-      <div class="numeric-strip" data-tauri-drag-region>
+      <div class="numeric-strip">
         <span id="num-cpu" class="num-v">--</span>
         <span class="num-sep">/</span>
         <span id="num-mem" class="num-v">--</span>
@@ -69,24 +69,24 @@
         </button>
       </div>
 
-      <div class="vertical-strip" data-tauri-drag-region>
-        <div class="v-item" data-metric="cpu" data-tauri-drag-region>
+      <div class="vertical-strip">
+        <div class="v-item" data-metric="cpu">
           <span class="v-k">CPU</span>
           <span id="v-cpu" class="v-v">--%</span>
         </div>
-        <div class="v-item" data-metric="mem" data-tauri-drag-region>
+        <div class="v-item" data-metric="mem">
           <span class="v-k">内存</span>
           <span id="v-mem" class="v-v">--%</span>
         </div>
-        <div class="v-item" data-metric="temp" data-tauri-drag-region>
+        <div class="v-item" data-metric="temp">
           <span class="v-k">温度</span>
           <span id="v-temp" class="v-v">--</span>
         </div>
-        <div class="v-item" data-metric="gpu" data-tauri-drag-region>
+        <div class="v-item" data-metric="gpu">
           <span class="v-k">GPU</span>
           <span id="v-gpu" class="v-v sm">--</span>
         </div>
-        <div class="v-item net" data-tauri-drag-region>
+        <div class="v-item net">
           <span class="v-k">网络</span>
           <span id="v-net" class="v-v sm">↓--</span>
           <span id="v-net-up" class="v-v sm">↑--</span>
@@ -94,10 +94,10 @@
       </div>
 
       <div class="panel-view">
-        <header class="panel-header" data-tauri-drag-region>
-          <span class="panel-title" data-tauri-drag-region>系统监测</span>
+        <header class="panel-header">
+          <span class="panel-title">系统监测</span>
           <span id="overlay-alert-flag" class="panel-flag" hidden>告警</span>
-          <span id="overlay-updated" class="panel-time" data-tauri-drag-region>--</span>
+          <span id="overlay-updated" class="panel-time">--</span>
           <button type="button" id="btn-collapse" class="icon-btn" title="收起" aria-label="收起">
             <span class="chevron up"></span>
           </button>

@@ -730,6 +730,8 @@ async function refreshMetrics() {
     }
   } catch (error) {
     console.error('获取监测数据失败', error);
+    const updatedAt = document.querySelector('#updated-at');
+    if (updatedAt) updatedAt.textContent = '数据中断';
   }
 }
 
@@ -999,14 +1001,7 @@ async function setSettingsOpen(open: boolean) {
   await invoke('set_settings_open', { open });
 }
 
-async function switchTab(tab: TabId) {
-  if (currentTab === tab) {
-    if (tab === 'settings') {
-      await setSettingsOpen(true);
-    }
-    return;
-  }
-
+function showTab(tab: TabId) {
   currentTab = tab;
 
   const tabs = document.querySelectorAll<HTMLButtonElement>('.tab');
@@ -1020,9 +1015,25 @@ async function switchTab(tab: TabId) {
   const settingsView = document.querySelector('#view-settings') as HTMLElement | null;
   if (monitorView) monitorView.hidden = tab !== 'monitor';
   if (settingsView) settingsView.hidden = tab !== 'settings';
+}
+
+async function switchTab(tab: TabId) {
+  if (currentTab === tab) {
+    if (tab === 'settings') {
+      await setSettingsOpen(true);
+    }
+    return;
+  }
 
   if (tab === 'settings') {
-    await setSettingsOpen(true);
+    try {
+      await setSettingsOpen(true);
+    } catch (error) {
+      console.error('无法锁定设置页，未切换', error);
+      showSettingsMessage('无法锁定设置页，未切换', 'error');
+      return;
+    }
+    showTab('settings');
     try {
       await loadSettingsForm();
       showSettingsMessage('');
@@ -1030,10 +1041,20 @@ async function switchTab(tab: TabId) {
       console.error('加载告警设置失败', error);
       showSettingsMessage('加载设置失败', 'error');
     }
-  } else {
-    await setSettingsOpen(false);
-    await refreshHistoryChart();
+    return;
   }
+
+  showTab(tab);
+  try {
+    await setSettingsOpen(false);
+  } catch (error) {
+    try {
+      await setSettingsOpen(false);
+    } catch (retryError) {
+      console.error('关闭设置页锁定失败', error, retryError);
+    }
+  }
+  await refreshHistoryChart();
 }
 
 function bindSettingsUi() {

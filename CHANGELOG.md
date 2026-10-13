@@ -6,6 +6,28 @@
 
 ## [Unreleased]
 
+## [0.1.4]
+
+### 修复
+
+- 启动首帧网速不再把网卡累计字节当成瞬时速率
+- 磁盘可用空间大于总量时不再下溢误报
+- 进程 Top 刷新不再长时间占用指标采样锁
+- WMI 超时结果不再被下一轮当成当前温度；COM 初始化失败后不再反复建线程
+- 告警仅在通知发送成功后计入冷却，贴线抖动增加滞回
+- LHM 无 CPU 温度时不再把 GPU / 风扇贴到 WMI 回退帧；请求不再跟随重定向
+- 配置落盘不再持有配置锁；主面板坐标会收拢到当前工作区
+- 叠加层布局切换失败或并发时不再与窗口尺寸分叉；穿透开启时移入 peek 热区仍会展开
+- 进入设置页前先锁定失焦保护；采样失败时显示数据中断
+
+### 变更
+
+- 叠加层展开高度调整为 360，容纳 Swap 与 GPU / 风扇详情
+- LHM 地址仅允许 `127.0.0.1` 与 `[::1]`，不再接受 `localhost`
+- 移除未使用的 opener 插件
+- Release 要求 tag 与版本号一致，产物缺失则工作流失败
+- Release 产物改为 `sysmon-tray-setup.exe` 与 `sysmon-tray-portable.exe`
+
 ## [0.1.3]
 
 ### 新增
@@ -78,11 +100,12 @@
 ### 构建
 
 - `npm run build:exe` 本地打包
-- GitHub Actions Release 正式发布：NSIS 安装包 + 便携 `sysmon-tray.exe`
+- GitHub Actions Release 正式发布：`sysmon-tray-setup.exe` + `sysmon-tray-portable.exe`
 - NSIS 安装界面支持中英双语选择
-- Release 资源英文命名：`sysmon-tray_*_x64-setup.exe`
+- Release 资源英文命名：`sysmon-tray-setup.exe`、`sysmon-tray-portable.exe`
 
-[Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.0...v0.1.1

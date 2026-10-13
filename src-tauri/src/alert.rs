@@ -5,9 +5,13 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const DEFAULT_COOLDOWN_SECS: u64 = 60;
+/// 百分比类（CPU / 内存 / 磁盘）解除线相对触发线的回差
+const HYSTERESIS_PERCENT: f32 = 3.0;
+/// 温度解除线相对触发线的回差（°C）
+const HYSTERESIS_TEMP: f32 = 2.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum AlertKind {
+pub enum AlertKind {
     Cpu,
     Memory,
     Temperature,
@@ -92,6 +96,8 @@ impl AlertStatus {
 pub struct AlertEngine {
     thresholds: AlertThresholds,
     last_fired: HashMap<AlertKind, Instant>,
+    /// 已越过触发线；降到解除线以下才清除。latched 期间不再 fire，避免贴线抖动连发。
+    latched: HashMap<AlertKind, bool>,
 }
 
 impl AlertEngine {
@@ -99,6 +105,7 @@ impl AlertEngine {
         Self {
             thresholds,
             last_fired: HashMap::new(),
+            latched: HashMap::new(),
         }
     }
 
@@ -110,68 +117,130 @@ impl AlertEngine {
         self.thresholds = thresholds;
     }
 
-    /// 根据当前指标评估告警。返回 (状态, 本次新触发且已过冷却的种类)
-    pub fn evaluate(&mut self, metrics: &Metrics) -> (AlertStatus, Vec<String>) {
+    /// 根据当前指标评估告警。不写 last_fired；返回 (状态, 本次新触发且已过冷却的通知)。
+    /// 通知是否真正发出由调用方决定，成功后再 `mark_fired`。
+    pub fn evaluate(
+        &mut self,
+        metrics: &Metrics,
+    ) -> (AlertStatus, Vec<(AlertKind, String)>) {
         let t = self.thresholds.clone();
         let mut messages = Vec::new();
         let mut newly_fired = Vec::new();
 
-        let cpu = metrics.cpu_percent >= t.cpu_percent;
+        let cpu_rising = self.rising_edge(AlertKind::Cpu, metrics.cpu_percent, t.cpu_percent);
+        let cpu = self.observe(
+            AlertKind::Cpu,
+            metrics.cpu_percent,
+            t.cpu_percent,
+            HYSTERESIS_PERCENT,
+        );
         if cpu {
             messages.push(format!("CPU {:.0}%", metrics.cpu_percent));
-            if self.try_fire(AlertKind::Cpu) {
-                newly_fired.push(format!(
-                    "CPU 占用过高：{:.1}%（阈值 {:.0}%）",
-                    metrics.cpu_percent, t.cpu_percent
+            if cpu_rising && self.should_fire(AlertKind::Cpu) {
+                newly_fired.push((
+                    AlertKind::Cpu,
+                    format!(
+                        "CPU 占用过高：{:.1}%（阈值 {:.0}%）",
+                        metrics.cpu_percent, t.cpu_percent
+                    ),
                 ));
             }
         }
 
-        let memory = metrics.memory_percent >= t.memory_percent;
+        let memory_rising =
+            self.rising_edge(AlertKind::Memory, metrics.memory_percent, t.memory_percent);
+        let memory = self.observe(
+            AlertKind::Memory,
+            metrics.memory_percent,
+            t.memory_percent,
+            HYSTERESIS_PERCENT,
+        );
         if memory {
             messages.push(format!("内存 {:.0}%", metrics.memory_percent));
-            if self.try_fire(AlertKind::Memory) {
-                newly_fired.push(format!(
-                    "内存占用过高：{:.1}%（阈值 {:.0}%）",
-                    metrics.memory_percent, t.memory_percent
+            if memory_rising && self.should_fire(AlertKind::Memory) {
+                newly_fired.push((
+                    AlertKind::Memory,
+                    format!(
+                        "内存占用过高：{:.1}%（阈值 {:.0}%）",
+                        metrics.memory_percent, t.memory_percent
+                    ),
                 ));
             }
         }
 
         let temperature = match metrics.cpu_temp_celsius {
-            Some(temp) if temp >= t.cpu_temp_celsius => {
-                messages.push(format!("温度 {:.0}°C", temp));
-                if self.try_fire(AlertKind::Temperature) {
-                    newly_fired.push(format!(
-                        "CPU 温度过高：{:.1}°C（阈值 {:.0}°C）",
-                        temp, t.cpu_temp_celsius
-                    ));
+            Some(temp) => {
+                let rising = self.rising_edge(AlertKind::Temperature, temp, t.cpu_temp_celsius);
+                let active = self.observe(
+                    AlertKind::Temperature,
+                    temp,
+                    t.cpu_temp_celsius,
+                    HYSTERESIS_TEMP,
+                );
+                if active {
+                    messages.push(format!("温度 {:.0}°C", temp));
+                    if rising && self.should_fire(AlertKind::Temperature) {
+                        newly_fired.push((
+                            AlertKind::Temperature,
+                            format!(
+                                "CPU 温度过高：{:.1}°C（阈值 {:.0}°C）",
+                                temp, t.cpu_temp_celsius
+                            ),
+                        ));
+                    }
                 }
-                true
+                active
             }
-            _ => false,
+            None => {
+                self.clear_latch(AlertKind::Temperature);
+                false
+            }
         };
 
-        let mut disk = false;
+        let mut disk_peak = 0.0_f32;
         let mut disk_notify = Vec::new();
         for d in &metrics.disks {
+            if d.used_percent > disk_peak {
+                disk_peak = d.used_percent;
+            }
             if d.used_percent < t.disk_percent {
                 continue;
             }
-            disk = true;
             let mount = if d.mount_point.is_empty() {
                 d.name.as_str()
             } else {
                 d.mount_point.as_str()
             };
-            messages.push(format!("{mount} {:.0}%", d.used_percent));
             disk_notify.push(format!(
                 "磁盘 {mount} 占用过高：{:.1}%（阈值 {:.0}%）",
                 d.used_percent, t.disk_percent
             ));
         }
-        if disk && self.try_fire(AlertKind::Disk) {
-            newly_fired.extend(disk_notify);
+        let disk_rising = self.rising_edge(AlertKind::Disk, disk_peak, t.disk_percent);
+        let disk = self.observe(
+            AlertKind::Disk,
+            disk_peak,
+            t.disk_percent,
+            HYSTERESIS_PERCENT,
+        );
+        if disk {
+            let release = (t.disk_percent - HYSTERESIS_PERCENT).max(0.0);
+            for d in &metrics.disks {
+                if d.used_percent < release {
+                    continue;
+                }
+                let mount = if d.mount_point.is_empty() {
+                    d.name.as_str()
+                } else {
+                    d.mount_point.as_str()
+                };
+                messages.push(format!("{mount} {:.0}%", d.used_percent));
+            }
+            if disk_rising && self.should_fire(AlertKind::Disk) {
+                for msg in disk_notify {
+                    newly_fired.push((AlertKind::Disk, msg));
+                }
+            }
         }
 
         let active = cpu || memory || temperature || disk;
@@ -189,15 +258,51 @@ impl AlertEngine {
         )
     }
 
-    fn try_fire(&mut self, kind: AlertKind) -> bool {
-        let cooldown = Duration::from_secs(self.thresholds.cooldown_secs.max(1));
+    /// 仅在通知实际 show 成功后记账，避免评估阶段或通知关闭时吃掉冷却。
+    pub fn mark_fired(&mut self, kinds: &[AlertKind]) {
         let now = Instant::now();
-        match self.last_fired.get(&kind) {
-            Some(last) if now.duration_since(*last) < cooldown => false,
-            _ => {
-                self.last_fired.insert(kind, now);
+        for kind in kinds {
+            self.last_fired.insert(*kind, now);
+        }
+    }
+
+    fn is_latched(&self, kind: AlertKind) -> bool {
+        self.latched.get(&kind).copied().unwrap_or(false)
+    }
+
+    fn clear_latch(&mut self, kind: AlertKind) {
+        self.latched.insert(kind, false);
+    }
+
+    /// 本帧从未 latched 跨过触发线。须在 observe 更新 latch 之前调用。
+    fn rising_edge(&self, kind: AlertKind, value: f32, threshold: f32) -> bool {
+        !self.is_latched(kind) && value >= threshold
+    }
+
+    /// 未 latched 用触发线；已 latched 只有降到解除线以下才清除。
+    fn observe(&mut self, kind: AlertKind, value: f32, threshold: f32, hysteresis: f32) -> bool {
+        let release = (threshold - hysteresis).max(0.0);
+        if self.is_latched(kind) {
+            if value < release {
+                self.clear_latch(kind);
+                false
+            } else {
                 true
             }
+        } else if value >= threshold {
+            self.latched.insert(kind, true);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 冷却只限制同一次恢复后的重复触发。不修改 last_fired；latched 期间由 rising_edge 挡住。
+    fn should_fire(&self, kind: AlertKind) -> bool {
+        let cooldown = Duration::from_secs(self.thresholds.cooldown_secs.max(1));
+        match self.last_fired.get(&kind) {
+            Some(last) if last.elapsed() < cooldown => false,
+            _ => true,
         }
     }
 }

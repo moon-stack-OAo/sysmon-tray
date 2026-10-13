@@ -49,14 +49,14 @@ interface AppConfig {
   overlayClickThrough?: boolean;
   overlayStyle?: OverlayStyle;
   overlayEdgeX?: 'left' | 'right' | null;
-  overlayEdgeY?: 'top' | 'bottom' | null;
 }
 
 type OverlayMode = 'collapsed' | 'expanded' | 'peek';
 
 let mode: OverlayMode = 'collapsed';
 let style: OverlayStyle = 'capsule';
-let resizing = false;
+let layoutQueue: Promise<void> = Promise.resolve();
+let layoutDepth = 0;
 let autoHide = false;
 let edgeX: 'left' | 'right' | null = null;
 let hideTimer: number | undefined;
@@ -65,6 +65,7 @@ let pollTimer: number | undefined;
 let overlayEnabled = true;
 let clickThroughEnabled = false;
 let ignoreActive = false;
+let ignoreDesired = false;
 let ignoreApplyPromise: Promise<void> | null = null;
 let clickThroughPollTimer: number | undefined;
 let clickThroughLeaveTimer: number | undefined;
@@ -96,14 +97,17 @@ function clearClickThroughLeaveTimer() {
 }
 
 async function applyIgnoreCursorEvents(ignore: boolean) {
-  if (ignoreActive === ignore) return;
-  ignoreActive = ignore;
+  ignoreDesired = ignore;
   const apply = async () => {
+    if (ignoreActive === ignore) return;
     try {
       await getCurrentWindow().setIgnoreCursorEvents(ignore);
+      ignoreActive = ignore;
     } catch (error) {
-      console.error('设置鼠标穿透失败', error);
-      ignoreActive = !ignore;
+      if (ignoreDesired === ignore) {
+        console.error('设置鼠标穿透失败', error);
+        ignoreActive = !ignore;
+      }
     }
   };
   ignoreApplyPromise = (ignoreApplyPromise ?? Promise.resolve()).then(apply, apply);
@@ -144,10 +148,13 @@ async function isCursorOverOverlay(): Promise<boolean> {
 }
 
 async function tickClickThrough() {
-  if (!clickThroughEnabled || !overlayEnabled || resizing) return;
+  if (!clickThroughEnabled || !overlayEnabled || layoutDepth > 0) return;
   const over = await isCursorOverOverlay();
   if (over) {
     clearClickThroughLeaveTimer();
+    if (mode === 'peek') {
+      void revealFromPeek();
+    }
     if (ignoreActive) {
       await applyIgnoreCursorEvents(false);
     }
@@ -156,7 +163,7 @@ async function tickClickThrough() {
   if (pointerDown || ignoreActive || clickThroughLeaveTimer !== undefined) return;
   clickThroughLeaveTimer = window.setTimeout(() => {
     clickThroughLeaveTimer = undefined;
-    if (!clickThroughEnabled || !overlayEnabled || pointerDown || resizing) return;
+    if (!clickThroughEnabled || !overlayEnabled || pointerDown || layoutDepth > 0) return;
     void applyIgnoreCursorEvents(true);
   }, CLICK_THROUGH_LEAVE_MS);
 }
@@ -356,25 +363,43 @@ function clearHideTimer() {
   }
 }
 
+function enqueueLayout(task: () => Promise<void>): Promise<void> {
+  const run = layoutQueue.then(task, task);
+  layoutQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+async function applyLayout(next: OverlayMode, force = false) {
+  if (!force && mode === next) return;
+  await enqueueLayout(async () => {
+    if (!force && mode === next) return;
+    layoutDepth += 1;
+    const root = document.querySelector('#overlay-root') as HTMLElement | null;
+    try {
+      root?.classList.add('layout-switching');
+      await invoke('set_overlay_layout', { mode: next });
+      mode = next;
+      applyModeClass(mode);
+      // 每秒只更新当前可见视图，切换后需立即刷新一次新视图
+      void refreshOverlay();
+    } catch (error) {
+      console.error('切换叠加层布局失败', error);
+      applyModeClass(mode);
+      throw error;
+    } finally {
+      requestAnimationFrame(() => {
+        root?.classList.remove('layout-switching');
+      });
+      layoutDepth -= 1;
+    }
+  });
+}
+
 async function setMode(next: OverlayMode) {
-  if (mode === next || resizing) return;
-  resizing = true;
-  const root = document.querySelector('#overlay-root') as HTMLElement | null;
-  try {
-    root?.classList.add('layout-switching');
-    await invoke('set_overlay_layout', { mode: next });
-    mode = next;
-    applyModeClass(mode);
-    // 每秒只更新当前可见视图，切换后需立即刷新一次新视图
-    void refreshOverlay();
-  } catch (error) {
-    console.error('切换叠加层布局失败', error);
-  } finally {
-    requestAnimationFrame(() => {
-      root?.classList.remove('layout-switching');
-      resizing = false;
-    });
-  }
+  await applyLayout(next, false);
 }
 
 async function setCollapsed(nextCollapsed: boolean) {
@@ -417,10 +442,7 @@ async function applyOverlayStyle(next: OverlayStyle) {
   if (mode === 'peek') {
     return;
   }
-  // 强制按当前形态重算 collapsed 尺寸
-  const prev = mode;
-  mode = 'expanded';
-  await setMode(prev);
+  await applyLayout(mode, true);
 }
 
 async function loadOverlayConfig() {
@@ -624,13 +646,15 @@ async function refreshOverlay() {
     refreshActiveView(await invoke<Metrics>('get_metrics'));
   } catch (error) {
     console.error('叠加层获取监测数据失败', error);
+    const updated = document.querySelector('#overlay-updated');
+    if (updated) updated.textContent = '中断';
   }
 }
 
 function bindWindowDrag(root: HTMLElement) {
   const DRAG_THRESHOLD_PX = 3;
 
-  root.addEventListener('mousedown', (event) => {
+  root.addEventListener('pointerdown', (event) => {
     if (event.button !== 0) return;
     if (event.detail > 1) return;
     const target = event.target as HTMLElement | null;
@@ -638,13 +662,32 @@ function bindWindowDrag(root: HTMLElement) {
 
     pointerDown = true;
     clearClickThroughLeaveTimer();
+    try {
+      root.setPointerCapture(event.pointerId);
+    } catch {
+      // 捕获失败时仍靠 pointerup / pointercancel / lostpointercapture 解绑
+    }
 
     const startX = event.clientX;
     const startY = event.clientY;
     let started = false;
+    let done = false;
 
-    const onMove = (moveEvent: MouseEvent) => {
-      if (started) return;
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      pointerDown = false;
+      root.removeEventListener('pointermove', onMove);
+      root.removeEventListener('pointerup', cleanup);
+      root.removeEventListener('pointercancel', cleanup);
+      root.removeEventListener('lostpointercapture', cleanup);
+      if (clickThroughEnabled && overlayEnabled) {
+        void tickClickThrough();
+      }
+    };
+
+    const onMove = (moveEvent: PointerEvent) => {
+      if (started || done) return;
       if (
         Math.abs(moveEvent.clientX - startX) < DRAG_THRESHOLD_PX &&
         Math.abs(moveEvent.clientY - startY) < DRAG_THRESHOLD_PX
@@ -656,17 +699,10 @@ function bindWindowDrag(root: HTMLElement) {
       void getCurrentWindow().startDragging();
     };
 
-    const cleanup = () => {
-      pointerDown = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', cleanup);
-      if (clickThroughEnabled && overlayEnabled) {
-        void tickClickThrough();
-      }
-    };
-
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', cleanup);
+    root.addEventListener('pointermove', onMove);
+    root.addEventListener('pointerup', cleanup);
+    root.addEventListener('pointercancel', cleanup);
+    root.addEventListener('lostpointercapture', cleanup);
   });
 }
 
