@@ -1,6 +1,6 @@
 [package]
 name = "sysmon-tray"
-version = "0.1.4"
+version = "0.1.5"
 description = "System monitor tray app"
 authors = ["you"]
 edition = "2021"
@@ -13,13 +13,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2.12.4", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = "0.37"
 dirs = "6"
 tauri-plugin-notification = "2"
-tauri-plugin-global-shortcut = "2"
+tauri-plugin-global-shortcut = "2.4.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # 仅本机 HTTP；关闭默认 TLS，减小体积。gzip：LHM 可能压缩响应；json：解析 data.json
 ureq = { version = "3.4", default-features = false, features = ["gzip", "json"] }

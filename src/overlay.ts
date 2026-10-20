@@ -857,6 +857,9 @@ window.addEventListener('DOMContentLoaded', () => {
 
   void listen<string[]>('overlay-metrics-changed', (event) => {
     applyOverlayMetrics(event.payload);
+    if (mode === 'collapsed') {
+      void applyLayout(mode, true);
+    }
   });
 
   void listen<'left' | 'right'>('overlay-snap-edge', (event) => {

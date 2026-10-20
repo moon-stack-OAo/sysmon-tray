@@ -44,7 +44,7 @@ pub struct SharedOverlayPosDebounce(pub AtomicBool);
 pub struct SharedMainPosSave(pub Mutex<Option<Instant>>);
 pub struct SharedMainLastMove(pub Mutex<Option<Instant>>);
 pub struct SharedMainPosDebounce(pub AtomicBool);
-pub type SharedTrayAlert = Mutex<bool>;
+pub struct SharedTrayAlert(pub Mutex<bool>);
 
 const OVERLAY_SNAP_THRESHOLD_PX: i32 = 36;
 const OVERLAY_SNAP_CORNER_BONUS_PX: i32 = 12;
@@ -225,36 +225,53 @@ fn quiet_hours_active(cfg: &AppConfig) -> bool {
     }
 }
 
-const TRAY_ICON_SIZE: u32 = 32;
-
-fn tray_icon_rgba(alert: bool) -> Vec<u8> {
-    let (r, g, b) = if alert {
-        (220u8, 80, 80)
-    } else {
-        (88u8, 196, 196)
+fn default_tray_icon(app: &tauri::AppHandle) -> tauri::image::Image<'static> {
+    let fallback = || tauri::include_image!("icons/32x32.png");
+    let Some(icon) = app.default_window_icon() else {
+        return fallback();
     };
-    let size = TRAY_ICON_SIZE as i32;
-    let center = (size - 1) as f32 / 2.0;
-    let radius = center - 1.0;
-    let mut rgba = vec![0u8; (size * size * 4) as usize];
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f32 - center;
-            let dy = y as f32 - center;
-            if dx * dx + dy * dy <= radius * radius {
-                let i = ((y * size + x) * 4) as usize;
-                rgba[i] = r;
-                rgba[i + 1] = g;
-                rgba[i + 2] = b;
-                rgba[i + 3] = 255;
+    let rgba = icon.rgba();
+    let width = icon.width();
+    let height = icon.height();
+    if rgba.len() != (width * height * 4) as usize {
+        return fallback();
+    }
+    tauri::image::Image::new_owned(rgba.to_vec(), width, height)
+}
+
+fn alert_tray_icon(base: &tauri::image::Image<'_>) -> tauri::image::Image<'static> {
+    let rgba = base.rgba();
+    let width = base.width();
+    let height = base.height();
+    if width < 8 || height < 8 || rgba.len() != (width * height * 4) as usize {
+        return tauri::image::Image::new_owned(rgba.to_vec(), width, height);
+    }
+    let mut next = rgba.to_vec();
+    let badge = (width.min(height) / 3).max(6);
+    let x0 = width - badge - 1;
+    let y0 = height - badge - 1;
+    let cx = x0 as f32 + (badge as f32 - 1.0) / 2.0;
+    let cy = y0 as f32 + (badge as f32 - 1.0) / 2.0;
+    let radius = badge as f32 / 2.0;
+    for y in y0..height {
+        for x in x0..width {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            if dx * dx + dy * dy > radius * radius {
+                continue;
             }
+            let i = ((y * width + x) * 4) as usize;
+            next[i] = 220;
+            next[i + 1] = 64;
+            next[i + 2] = 64;
+            next[i + 3] = 255;
         }
     }
-    rgba
+    tauri::image::Image::new_owned(next, width, height)
 }
 
 fn sync_tray_alert_icon(app: &tauri::AppHandle, tray: &tauri::tray::TrayIcon<tauri::Wry>, active: bool) {
-    let changed = match app.state::<SharedTrayAlert>().lock() {
+    let changed = match app.state::<SharedTrayAlert>().0.lock() {
         Ok(mut last) => {
             if *last == active {
                 false
@@ -271,7 +288,12 @@ fn sync_tray_alert_icon(app: &tauri::AppHandle, tray: &tauri::tray::TrayIcon<tau
     if !changed {
         return;
     }
-    let image = tauri::image::Image::new_owned(tray_icon_rgba(active), TRAY_ICON_SIZE, TRAY_ICON_SIZE);
+    let base = default_tray_icon(app);
+    let image = if active {
+        alert_tray_icon(&base)
+    } else {
+        base
+    };
     if let Err(err) = tray.set_icon(Some(image)) {
         eprintln!("更新托盘图标失败: {err}");
     }
@@ -607,6 +629,11 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
     let _ = app.emit("overlay-click-through-changed", input.overlay_click_through);
     let _ = app.emit("overlay-style-changed", parsed_style.as_str());
     let _ = app.emit("overlay-metrics-changed", overlay_metrics.clone());
+    if input.overlay_enabled {
+        if let Err(err) = apply_overlay_layout(OverlayLayoutMode::Collapsed, app) {
+            eprintln!("按指标重算叠加层尺寸失败: {err}");
+        }
+    }
 
     if input.notification_enabled {
         // 测试通知失败不影响保存结果
@@ -754,18 +781,42 @@ fn parse_overlay_layout_mode(mode: &str) -> Result<OverlayLayoutMode, String> {
     }
 }
 
+fn overlay_metric_count(metrics: &[String]) -> u32 {
+    let count = metrics
+        .iter()
+        .filter(|id| matches!(id.as_str(), "cpu" | "mem" | "temp" | "gpu" | "net"))
+        .count() as u32;
+    count.clamp(1, 5)
+}
+
+fn collapsed_overlay_size(style: OverlayStyle, metric_count: u32) -> (u32, u32) {
+    let count = metric_count.clamp(1, 5);
+    let hidden = 5 - count;
+    match style {
+        // 五项满宽 378：每项约 62，分隔与展开按钮保留
+        OverlayStyle::Capsule => (
+            OVERLAY_COLLAPSED_WIDTH - hidden * 62,
+            OVERLAY_COLLAPSED_HEIGHT,
+        ),
+        // 五项满高 200：每行约 32
+        OverlayStyle::Vertical => (
+            OVERLAY_VERTICAL_WIDTH,
+            OVERLAY_VERTICAL_HEIGHT - hidden * 32,
+        ),
+        // 五项满宽 246：每项约 36
+        OverlayStyle::Numeric => (OVERLAY_NUMERIC_WIDTH - hidden * 36, OVERLAY_NUMERIC_HEIGHT),
+    }
+}
+
 fn overlay_layout_size(
     mode: OverlayLayoutMode,
     style: OverlayStyle,
     _edge_x: Option<OverlayEdgeX>,
     _edge_y: Option<OverlayEdgeY>,
+    metrics: &[String],
 ) -> (u32, u32) {
     match mode {
-        OverlayLayoutMode::Collapsed => match style {
-            OverlayStyle::Capsule => (OVERLAY_COLLAPSED_WIDTH, OVERLAY_COLLAPSED_HEIGHT),
-            OverlayStyle::Vertical => (OVERLAY_VERTICAL_WIDTH, OVERLAY_VERTICAL_HEIGHT),
-            OverlayStyle::Numeric => (OVERLAY_NUMERIC_WIDTH, OVERLAY_NUMERIC_HEIGHT),
-        },
+        OverlayLayoutMode::Collapsed => collapsed_overlay_size(style, overlay_metric_count(metrics)),
         OverlayLayoutMode::Expanded => (OVERLAY_EXPANDED_WIDTH, OVERLAY_EXPANDED_HEIGHT),
         OverlayLayoutMode::Peek => {
             // 自动隐藏热区仅服务左右贴边，固定为竖细条
@@ -784,13 +835,18 @@ fn apply_overlay_layout(mode: OverlayLayoutMode, app: &AppHandle) -> Result<(), 
         *quiet = Some(quiet_until);
     }
 
-    let (edge_x, edge_y, style) = {
+    let (edge_x, edge_y, style, metrics) = {
         let state = app.state::<SharedConfig>();
         let cfg = state.lock().map_err(|e| e.to_string())?;
-        (cfg.overlay_edge_x, cfg.overlay_edge_y, cfg.overlay_style)
+        (
+            cfg.overlay_edge_x,
+            cfg.overlay_edge_y,
+            cfg.overlay_style,
+            cfg.overlay_metrics.clone(),
+        )
     };
 
-    let (width, height) = overlay_layout_size(mode, style, edge_x, edge_y);
+    let (width, height) = overlay_layout_size(mode, style, edge_x, edge_y, &metrics);
 
     let scale = window.scale_factor().unwrap_or(1.0);
     let prev_pos = window
@@ -1691,7 +1747,7 @@ pub fn run() {
         .manage(SharedMainPosSave(Mutex::new(None)))
         .manage(SharedMainLastMove(Mutex::new(None)))
         .manage(SharedMainPosDebounce(AtomicBool::new(false)))
-        .manage(Mutex::new(false) as SharedTrayAlert)
+        .manage(SharedTrayAlert(Mutex::new(false)))
         .manage(lhm_runtime as SharedLhmRuntime)
         .manage(temp_tracker as SharedTempTracker)
         .manage(lhm_extras)

@@ -1,7 +1,7 @@
 {
   "name": "sysmon-tray",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,12 +16,12 @@
     "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; for (const p of ['dist', 'src-tauri/target']) rmSync(p, { recursive: true, force: true });\""
   },
   "dependencies": {
-    "@tauri-apps/api": "^2",
+    "@tauri-apps/api": "2.12.4",
     "@tauri-apps/plugin-autostart": "^2.5.1",
     "@tauri-apps/plugin-notification": "^2.4.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
+    "@tauri-apps/cli": "2.12.3",
     "prettier": "^3.9.6",
     "typescript": "~5.6.2",
     "vite": "^6.0.3"

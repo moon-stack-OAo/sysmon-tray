@@ -66,15 +66,15 @@ fn default_quiet_end_minute() -> u16 {
 }
 
 fn default_hotkey_panel() -> String {
-    "Alt+Shift+S".to_string()
+    "Ctrl+Alt+Shift+S".to_string()
 }
 
 fn default_hotkey_overlay() -> String {
-    "Alt+Shift+O".to_string()
+    "Ctrl+Alt+Shift+O".to_string()
 }
 
 fn default_hotkey_click_through() -> String {
-    "Alt+Shift+C".to_string()
+    "Ctrl+Alt+Shift+X".to_string()
 }
 
 fn default_overlay_metrics() -> Vec<String> {
@@ -374,13 +374,19 @@ impl AppConfig {
         if validate_quiet_minute(cfg.quiet_end_minute, "安静结束").is_err() {
             cfg.quiet_end_minute = default_quiet_end_minute();
         }
-        if validate_hotkey(&cfg.hotkey_panel).is_err() {
+        if validate_hotkey(&cfg.hotkey_panel).is_err()
+            || cfg.hotkey_panel.eq_ignore_ascii_case("Alt+Shift+S")
+        {
             cfg.hotkey_panel = default_hotkey_panel();
         }
-        if validate_hotkey(&cfg.hotkey_overlay).is_err() {
+        if validate_hotkey(&cfg.hotkey_overlay).is_err()
+            || cfg.hotkey_overlay.eq_ignore_ascii_case("Alt+Shift+O")
+        {
             cfg.hotkey_overlay = default_hotkey_overlay();
         }
-        if validate_hotkey(&cfg.hotkey_click_through).is_err() {
+        if validate_hotkey(&cfg.hotkey_click_through).is_err()
+            || cfg.hotkey_click_through.eq_ignore_ascii_case("Alt+Shift+C")
+        {
             cfg.hotkey_click_through = default_hotkey_click_through();
         }
         cfg.overlay_metrics = normalize_overlay_metrics(&cfg.overlay_metrics);

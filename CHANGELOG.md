@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.1.5]
+
 ### 新增
 
 - GPU 占用告警与历史曲线
@@ -14,8 +16,13 @@
 - 磁盘按挂载点排序并可滚动
 - 告警持续秒数与安静时段
 - 全局快捷键：显示面板、开关叠加层、开关鼠标穿透
-- 叠加层收起态可勾选显示项
-- 监测页导出历史 CSV
+- 叠加层收起态可勾选显示项，窗口宽高随数量缩放
+- 监测页显示版本号，并可导出历史 CSV
+
+### 变更
+
+- 默认快捷键改为 `Ctrl+Alt+Shift+S` / `O` / `X`，避开已被系统占用的 `Alt+Shift+S`
+- 托盘平时保留应用图标，告警时只在右下角加红点
 
 ## [0.1.4]
 
@@ -115,7 +122,8 @@
 - NSIS 安装界面支持中英双语选择
 - Release 资源英文命名：`sysmon-tray-setup.exe`、`sysmon-tray-portable.exe`
 
-[Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.1...v0.1.2
