@@ -7,6 +7,7 @@ interface AlertStatus {
   memory: boolean;
   temperature: boolean;
   disk: boolean;
+  gpu: boolean;
   active: boolean;
   messages: string[];
 }
@@ -33,6 +34,8 @@ interface Metrics {
   swapTotalBytes: number;
   netDownBps: number;
   netUpBps: number;
+  netInterface: string | null;
+  netLink: string;
   cpuTempCelsius: number | null;
   gpu: GpuMetrics | null;
   fans: FanMetrics[];
@@ -49,6 +52,7 @@ interface AppConfig {
   overlayClickThrough?: boolean;
   overlayStyle?: OverlayStyle;
   overlayEdgeX?: 'left' | 'right' | null;
+  overlayMetrics?: string[];
 }
 
 type OverlayMode = 'collapsed' | 'expanded' | 'peek';
@@ -70,6 +74,8 @@ let ignoreApplyPromise: Promise<void> | null = null;
 let clickThroughPollTimer: number | undefined;
 let clickThroughLeaveTimer: number | undefined;
 let pointerDown = false;
+const DEFAULT_OVERLAY_METRICS = ['cpu', 'mem', 'temp', 'gpu', 'net'];
+let overlayMetrics = new Set(DEFAULT_OVERLAY_METRICS);
 
 const HIDE_DELAY_MS = 900;
 const CLICK_THROUGH_POLL_MS = 60;
@@ -430,6 +436,44 @@ async function revealFromPeek() {
   await setMode('collapsed');
 }
 
+function applyOverlayMetrics(ids: string[] | undefined) {
+  const next = new Set(
+    (ids ?? []).filter((id) => DEFAULT_OVERLAY_METRICS.includes(id)),
+  );
+  overlayMetrics = next.size ? next : new Set(DEFAULT_OVERLAY_METRICS);
+
+  const hideMetric = (el: Element, metric: string) => {
+    if (el instanceof HTMLElement) el.hidden = !overlayMetrics.has(metric);
+  };
+
+  document.querySelectorAll('.strip-metric[data-metric]').forEach((el) => {
+    hideMetric(el, el.getAttribute('data-metric') ?? '');
+  });
+  document.querySelectorAll('.numeric-strip [data-metric]').forEach((el) => {
+    hideMetric(el, el.getAttribute('data-metric') ?? '');
+  });
+  document.querySelectorAll('.vertical-strip [data-metric]').forEach((el) => {
+    hideMetric(el, el.getAttribute('data-metric') ?? '');
+  });
+
+  const syncSeps = (container: Element | null, sepSelector: string) => {
+    if (!container) return;
+    const children = Array.from(container.children);
+    for (const child of children) {
+      if (!child.matches(sepSelector) || !(child instanceof HTMLElement)) continue;
+      const prev = child.previousElementSibling;
+      const nextEl = child.nextElementSibling;
+      const prevVisible = prev instanceof HTMLElement && !prev.hidden && !prev.matches(sepSelector);
+      const nextVisible =
+        nextEl instanceof HTMLElement && !nextEl.hidden && !nextEl.matches(sepSelector);
+      child.hidden = !(prevVisible && nextVisible);
+    }
+  };
+
+  syncSeps(document.querySelector('.strip'), '.strip-sep');
+  syncSeps(document.querySelector('.numeric-strip'), '.num-sep');
+}
+
 async function applyOverlayStyle(next: OverlayStyle) {
   style = next;
   applyStyleClass(style);
@@ -452,6 +496,7 @@ async function loadOverlayConfig() {
     autoHide = !!cfg.overlayAutoHide;
     clickThroughEnabled = !!cfg.overlayClickThrough;
     edgeX = cfg.overlayEdgeX === 'left' || cfg.overlayEdgeX === 'right' ? cfg.overlayEdgeX : null;
+    applyOverlayMetrics(cfg.overlayMetrics);
     await applyOverlayStyle(normalizeStyle(cfg.overlayStyle));
     if (canPeekHide() && mode === 'collapsed') {
       await setMode('peek');
@@ -808,6 +853,10 @@ window.addEventListener('DOMContentLoaded', () => {
 
   void listen<string>('overlay-style-changed', (event) => {
     void applyOverlayStyle(normalizeStyle(event.payload));
+  });
+
+  void listen<string[]>('overlay-metrics-changed', (event) => {
+    applyOverlayMetrics(event.payload);
   });
 
   void listen<'left' | 'right'>('overlay-snap-edge', (event) => {

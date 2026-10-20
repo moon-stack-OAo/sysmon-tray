@@ -42,7 +42,7 @@
         </span>
         <span class="strip-sep"></span>
 
-        <span class="strip-metric strip-net">
+        <span class="strip-metric strip-net" data-metric="net">
           <span class="strip-k accent">↓</span>
           <span id="strip-net-down" class="strip-v">--</span>
           <span class="strip-k accent">↑</span>
@@ -55,15 +55,15 @@
       </div>
 
       <div class="numeric-strip">
-        <span id="num-cpu" class="num-v">--</span>
+        <span id="num-cpu" class="num-v" data-metric="cpu">--</span>
         <span class="num-sep">/</span>
-        <span id="num-mem" class="num-v">--</span>
+        <span id="num-mem" class="num-v" data-metric="mem">--</span>
         <span class="num-sep">/</span>
-        <span id="num-temp" class="num-v">--</span>
+        <span id="num-temp" class="num-v" data-metric="temp">--</span>
         <span class="num-sep">/</span>
-        <span id="num-gpu" class="num-v" title="GPU 占用%">--</span>
+        <span id="num-gpu" class="num-v" data-metric="gpu" title="GPU 占用%">--</span>
         <span class="num-sep">·</span>
-        <span id="num-net" class="num-v net">↓-- ↑--</span>
+        <span id="num-net" class="num-v net" data-metric="net">↓-- ↑--</span>
         <button type="button" id="btn-expand-num" class="icon-btn" title="展开" aria-label="展开">
           <span class="chevron down"></span>
         </button>
@@ -86,7 +86,7 @@
           <span class="v-k">GPU</span>
           <span id="v-gpu" class="v-v sm">--</span>
         </div>
-        <div class="v-item net">
+        <div class="v-item net" data-metric="net">
           <span class="v-k">网络</span>
           <span id="v-net" class="v-v sm">↓--</span>
           <span id="v-net-up" class="v-v sm">↑--</span>

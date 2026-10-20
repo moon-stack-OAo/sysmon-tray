@@ -337,6 +337,14 @@ body {
   flex-shrink: 0;
 }
 
+.strip-metric[hidden],
+.numeric-strip [data-metric][hidden],
+.num-sep[hidden],
+.strip-sep[hidden],
+.vertical-strip .v-item[hidden] {
+  display: none !important;
+}
+
 .strip-metric.alert .strip-v {
   color: var(--text-danger);
 }

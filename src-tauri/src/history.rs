@@ -15,8 +15,12 @@ pub struct HistoryPoint {
     pub cpu_percent: f32,
     pub memory_percent: f32,
     pub cpu_temp_celsius: Option<f32>,
+    pub gpu_load_percent: Option<f32>,
+    pub gpu_temp_celsius: Option<f32>,
     pub fan_rpm: Option<u32>,
     pub fan_name: Option<String>,
+    pub net_down_bps: u64,
+    pub net_up_bps: u64,
     pub timestamp_ms: u128,
 }
 
@@ -52,12 +56,17 @@ impl MetricsHistory {
             self.points.pop_front();
         }
         let primary = pick_primary_fan(&metrics.fans);
+        let gpu = metrics.gpu.as_ref();
         self.points.push_back(HistoryPoint {
             cpu_percent: metrics.cpu_percent,
             memory_percent: metrics.memory_percent,
             cpu_temp_celsius: metrics.cpu_temp_celsius,
+            gpu_load_percent: gpu.and_then(|g| g.load_percent),
+            gpu_temp_celsius: gpu.and_then(|g| g.temp_celsius),
             fan_rpm: primary.map(|f| f.rpm),
             fan_name: primary.map(|f| f.name.clone()),
+            net_down_bps: metrics.net_down_bps,
+            net_up_bps: metrics.net_up_bps,
             timestamp_ms: metrics.sampled_at_ms,
         });
     }
@@ -65,6 +74,42 @@ impl MetricsHistory {
     pub fn snapshot(&self) -> Vec<HistoryPoint> {
         self.points.iter().cloned().collect()
     }
+}
+
+fn csv_field_f32(value: Option<f32>) -> String {
+    match value {
+        Some(v) => format!("{v:.1}"),
+        None => String::new(),
+    }
+}
+
+fn csv_field_u32(value: Option<u32>) -> String {
+    match value {
+        Some(v) => v.to_string(),
+        None => String::new(),
+    }
+}
+
+/// 由历史点生成 CSV 文本。无温度 / GPU / 风扇留空字段，不把 None 写成 0。
+pub fn history_to_csv(points: &[HistoryPoint]) -> String {
+    let mut out = String::from(
+        "timestamp_ms,cpu_percent,memory_percent,cpu_temp_celsius,gpu_load_percent,gpu_temp_celsius,fan_rpm,net_down_bps,net_up_bps\n",
+    );
+    for point in points {
+        out.push_str(&format!(
+            "{},{:.1},{:.1},{},{},{},{},{},{}\n",
+            point.timestamp_ms,
+            point.cpu_percent,
+            point.memory_percent,
+            csv_field_f32(point.cpu_temp_celsius),
+            csv_field_f32(point.gpu_load_percent),
+            csv_field_f32(point.gpu_temp_celsius),
+            csv_field_u32(point.fan_rpm),
+            point.net_down_bps,
+            point.net_up_bps,
+        ));
+    }
+    out
 }
 
 /// 主风扇：CPU → 泵 → GPU → 机箱 → 其余第一条

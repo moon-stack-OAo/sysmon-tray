@@ -1,3 +1,4 @@
+import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
@@ -15,6 +16,7 @@ interface AlertThresholds {
   memoryPercent: number;
   cpuTempCelsius: number;
   diskPercent: number;
+  gpuPercent: number;
   cooldownSecs: number;
 }
 
@@ -30,6 +32,14 @@ interface AppConfig {
   overlayClickThrough: boolean;
   overlayStyle: 'capsule' | 'vertical' | 'numeric';
   processTopEnabled: boolean;
+  alertSustainSecs: number;
+  quietHoursEnabled: boolean;
+  quietStartMinute: number;
+  quietEndMinute: number;
+  hotkeyPanel: string;
+  hotkeyOverlay: string;
+  hotkeyClickThrough: string;
+  overlayMetrics: string[];
   overlayX?: number | null;
   overlayY?: number | null;
 }
@@ -62,6 +72,7 @@ interface AlertStatus {
   memory: boolean;
   temperature: boolean;
   disk: boolean;
+  gpu: boolean;
   active: boolean;
   messages: string[];
   thresholds: AlertThresholds;
@@ -91,6 +102,8 @@ interface Metrics {
   swapTotalBytes: number;
   netDownBps: number;
   netUpBps: number;
+  netInterface: string | null;
+  netLink: string;
   disks: DiskStat[];
   cpuTempCelsius: number | null;
   gpu: GpuMetrics | null;
@@ -104,8 +117,12 @@ interface HistoryPoint {
   cpuPercent: number;
   memoryPercent: number;
   cpuTempCelsius: number | null;
+  gpuLoadPercent: number | null;
+  gpuTempCelsius: number | null;
   fanRpm: number | null;
   fanName: string | null;
+  netDownBps: number;
+  netUpBps: number;
   timestampMs: number;
 }
 
@@ -157,7 +174,7 @@ function renderDiskList(
     diskList.textContent = '';
   }
 
-  const items = disks.slice(0, 4);
+  const items = disks;
   const existing = Array.from(diskList.querySelectorAll<HTMLElement>('.disk-item'));
 
   while (existing.length > items.length) {
@@ -187,7 +204,7 @@ function renderDiskList(
     const titleEl = item.querySelector('.disk-title');
     const barEl = item.querySelector('.progress-bar') as HTMLElement | null;
     const subEl = item.querySelector('.metric-sub');
-    const used = disk.totalBytes - disk.availableBytes;
+    const used = disk.availableBytes > disk.totalBytes ? 0 : disk.totalBytes - disk.availableBytes;
     const over = diskAlert && disk.usedPercent >= diskThreshold;
 
     if (titleEl) titleEl.textContent = disk.mountPoint || disk.name;
@@ -364,9 +381,15 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-function updateChartReadings(point: HistoryPoint | null, hasTemp: boolean, hasFan: boolean) {
+function updateChartReadings(
+  point: HistoryPoint | null,
+  hasTemp: boolean,
+  hasFan: boolean,
+  hasGpu: boolean,
+) {
   const cpuReading = document.querySelector('#chart-cpu-reading');
   const memReading = document.querySelector('#chart-mem-reading');
+  const gpuReading = document.querySelector('#chart-gpu-reading') as HTMLElement | null;
   const tempReading = document.querySelector('#chart-temp-reading') as HTMLElement | null;
   const fanReading = document.querySelector('#chart-fan-reading') as HTMLElement | null;
 
@@ -375,6 +398,15 @@ function updateChartReadings(point: HistoryPoint | null, hasTemp: boolean, hasFa
   }
   if (memReading) {
     memReading.textContent = point != null ? `内存 ${point.memoryPercent.toFixed(1)}%` : '内存 --';
+  }
+  if (gpuReading) {
+    if (hasGpu && point?.gpuLoadPercent != null) {
+      gpuReading.hidden = false;
+      gpuReading.textContent = `GPU ${point.gpuLoadPercent.toFixed(1)}%`;
+    } else {
+      gpuReading.hidden = true;
+      gpuReading.textContent = 'GPU --';
+    }
   }
   if (tempReading) {
     if (hasTemp && point?.cpuTempCelsius != null) {
@@ -399,6 +431,7 @@ function updateChartReadings(point: HistoryPoint | null, hasTemp: boolean, hasFa
 
 function drawHistoryChart(points: HistoryPoint[]) {
   const canvas = document.querySelector('#history-chart') as HTMLCanvasElement | null;
+  const gpuLegend = document.querySelector('#gpu-legend') as HTMLElement | null;
   const tempLegend = document.querySelector('#temp-legend') as HTMLElement | null;
   const fanLegend = document.querySelector('#fan-legend') as HTMLElement | null;
   if (!canvas) return;
@@ -435,9 +468,10 @@ function drawHistoryChart(points: HistoryPoint[]) {
     ctx.fillStyle = '#9c9c9d';
     ctx.font = '12px Inter, Segoe UI, Microsoft YaHei, sans-serif';
     ctx.fillText('采集中…', 10, cssHeight / 2 + 4);
+    if (gpuLegend) gpuLegend.hidden = true;
     if (tempLegend) tempLegend.hidden = true;
     if (fanLegend) fanLegend.hidden = true;
-    updateChartReadings(null, false, false);
+    updateChartReadings(null, false, false, false);
     return;
   }
 
@@ -448,8 +482,10 @@ function drawHistoryChart(points: HistoryPoint[]) {
   const n = drawPoints.length;
   const stepX = plotW / Math.max(n - 1, 1);
 
+  const hasGpu = drawPoints.some((p) => p.gpuLoadPercent != null);
   const hasTemp = drawPoints.some((p) => p.cpuTempCelsius != null);
   const hasFan = drawPoints.some((p) => p.fanRpm != null);
+  if (gpuLegend) gpuLegend.hidden = !hasGpu;
   if (tempLegend) tempLegend.hidden = !hasTemp;
   if (fanLegend) {
     fanLegend.hidden = !hasFan;
@@ -553,6 +589,13 @@ function drawHistoryChart(points: HistoryPoint[]) {
     '#5fc992',
     yPercent,
   );
+  if (hasGpu) {
+    drawSeries(
+      drawPoints.map((p) => p.gpuLoadPercent),
+      '#3dd68c',
+      yPercent,
+    );
+  }
   if (hasTemp) {
     drawSeries(
       drawPoints.map((p) => p.cpuTempCelsius),
@@ -568,7 +611,7 @@ function drawHistoryChart(points: HistoryPoint[]) {
     );
   }
 
-  updateChartReadings(drawPoints[drawPoints.length - 1] ?? null, hasTemp, hasFan);
+  updateChartReadings(drawPoints[drawPoints.length - 1] ?? null, hasTemp, hasFan, hasGpu);
 }
 
 async function refreshHistoryChart() {
@@ -669,7 +712,9 @@ async function refreshMetrics() {
         }
         gpuDetail.textContent = parts.join(' · ') || 'GPU';
       }
+      setCardAlert('#gpu-card', alert.gpu);
     } else {
+      setCardAlert('#gpu-card', false);
       if (gpuValue) gpuValue.textContent = '--';
       setBar(gpuBar, 0);
       if (gpuDetail) {
@@ -688,6 +733,16 @@ async function refreshMetrics() {
       renderFanList(fanList as HTMLElement, fans, metrics.tempSource);
     }
 
+    const netInterface = document.querySelector('#net-interface');
+    if (netInterface) {
+      if (metrics.netLink === 'down') {
+        netInterface.textContent = '未检测到网卡';
+      } else if (metrics.netInterface) {
+        netInterface.textContent = metrics.netInterface;
+      } else {
+        netInterface.textContent = '';
+      }
+    }
     if (netDown) netDown.textContent = formatSpeed(metrics.netDownBps);
     if (netUp) netUp.textContent = formatSpeed(metrics.netUpBps);
 
@@ -759,6 +814,26 @@ function normalizeOverlayStyle(
   return 'capsule';
 }
 
+const DEFAULT_OVERLAY_METRICS = ['cpu', 'mem', 'temp', 'gpu', 'net'];
+
+function minuteToTimeValue(minute: number): string {
+  const clamped = Math.max(0, Math.min(1439, Math.round(minute)));
+  const hours = Math.floor(clamped / 60);
+  const mins = clamped % 60;
+  return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+}
+
+function timeValueToMinute(value: string, fallback: number): number {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+  if (!match) return fallback;
+  const hours = Number(match[1]);
+  const mins = Number(match[2]);
+  if (!Number.isFinite(hours) || !Number.isFinite(mins) || hours > 23 || mins > 59) {
+    return fallback;
+  }
+  return hours * 60 + mins;
+}
+
 interface SettingsFormValues {
   thresholds: AlertThresholds;
   notificationEnabled?: boolean;
@@ -771,6 +846,14 @@ interface SettingsFormValues {
   overlayClickThrough?: boolean;
   overlayStyle?: 'capsule' | 'vertical' | 'numeric';
   processTopEnabled?: boolean;
+  alertSustainSecs?: number;
+  quietHoursEnabled?: boolean;
+  quietStartMinute?: number;
+  quietEndMinute?: number;
+  hotkeyPanel?: string;
+  hotkeyOverlay?: string;
+  hotkeyClickThrough?: string;
+  overlayMetrics?: string[];
 }
 
 function fillSettingsForm(values: SettingsFormValues) {
@@ -786,12 +869,22 @@ function fillSettingsForm(values: SettingsFormValues) {
     overlayClickThrough,
     overlayStyle,
     processTopEnabled: processTop,
+    alertSustainSecs,
+    quietHoursEnabled,
+    quietStartMinute,
+    quietEndMinute,
+    hotkeyPanel,
+    hotkeyOverlay,
+    hotkeyClickThrough,
+    overlayMetrics,
   } = values;
   const cpu = document.querySelector('#setting-cpu') as HTMLInputElement | null;
   const memory = document.querySelector('#setting-memory') as HTMLInputElement | null;
   const temp = document.querySelector('#setting-temp') as HTMLInputElement | null;
   const disk = document.querySelector('#setting-disk') as HTMLInputElement | null;
+  const gpu = document.querySelector('#setting-gpu') as HTMLInputElement | null;
   const cooldown = document.querySelector('#setting-cooldown') as HTMLInputElement | null;
+  const sustain = document.querySelector('#setting-sustain') as HTMLInputElement | null;
   const notification = document.querySelector('#setting-notification') as HTMLInputElement | null;
   const overlay = document.querySelector('#setting-overlay') as HTMLInputElement | null;
   const autostart = document.querySelector('#setting-autostart') as HTMLInputElement | null;
@@ -808,12 +901,48 @@ function fillSettingsForm(values: SettingsFormValues) {
   const preciseTemp = document.querySelector('#setting-precise-temp') as HTMLInputElement | null;
   const lhmUrl = document.querySelector('#setting-lhm-url') as HTMLInputElement | null;
   const processTopEl = document.querySelector('#setting-process-top') as HTMLInputElement | null;
+  const quietEnabled = document.querySelector('#setting-quiet-enabled') as HTMLInputElement | null;
+  const quietStart = document.querySelector('#setting-quiet-start') as HTMLInputElement | null;
+  const quietEnd = document.querySelector('#setting-quiet-end') as HTMLInputElement | null;
+  const hotkeyPanelEl = document.querySelector('#setting-hotkey-panel') as HTMLInputElement | null;
+  const hotkeyOverlayEl = document.querySelector(
+    '#setting-hotkey-overlay',
+  ) as HTMLInputElement | null;
+  const hotkeyClickThroughEl = document.querySelector(
+    '#setting-hotkey-click-through',
+  ) as HTMLInputElement | null;
 
   if (cpu) cpu.value = String(Math.round(thresholds.cpuPercent));
   if (memory) memory.value = String(Math.round(thresholds.memoryPercent));
   if (temp) temp.value = String(Math.round(thresholds.cpuTempCelsius));
   if (disk) disk.value = String(Math.round(thresholds.diskPercent));
+  if (gpu) gpu.value = String(Math.round(thresholds.gpuPercent));
   if (cooldown) cooldown.value = String(thresholds.cooldownSecs);
+  if (sustain && alertSustainSecs !== undefined) {
+    sustain.value = String(alertSustainSecs);
+  }
+  if (quietEnabled && quietHoursEnabled !== undefined) {
+    quietEnabled.checked = quietHoursEnabled;
+  }
+  if (quietStart && quietStartMinute !== undefined) {
+    quietStart.value = minuteToTimeValue(quietStartMinute);
+  }
+  if (quietEnd && quietEndMinute !== undefined) {
+    quietEnd.value = minuteToTimeValue(quietEndMinute);
+  }
+  if (hotkeyPanelEl && hotkeyPanel !== undefined) hotkeyPanelEl.value = hotkeyPanel;
+  if (hotkeyOverlayEl && hotkeyOverlay !== undefined) hotkeyOverlayEl.value = hotkeyOverlay;
+  if (hotkeyClickThroughEl && hotkeyClickThrough !== undefined) {
+    hotkeyClickThroughEl.value = hotkeyClickThrough;
+  }
+  if (overlayMetrics) {
+    const selected = new Set(overlayMetrics);
+    document
+      .querySelectorAll<HTMLInputElement>('.metric-checks input[data-metric]')
+      .forEach((input) => {
+        input.checked = selected.has(input.dataset.metric ?? '');
+      });
+  }
   if (notification && notificationEnabled !== undefined) {
     notification.checked = notificationEnabled;
   }
@@ -844,6 +973,41 @@ function fillSettingsForm(values: SettingsFormValues) {
   if (processTopEl && processTop !== undefined) {
     processTopEl.checked = processTop;
   }
+}
+
+function readAlertSustainSecs(): number {
+  const el = document.querySelector('#setting-sustain') as HTMLInputElement | null;
+  const value = Number(el?.value ?? 5);
+  return Number.isFinite(value) ? value : 5;
+}
+
+function readQuietHoursEnabled(): boolean {
+  const el = document.querySelector('#setting-quiet-enabled') as HTMLInputElement | null;
+  return el?.checked ?? false;
+}
+
+function readQuietStartMinute(): number {
+  const el = document.querySelector('#setting-quiet-start') as HTMLInputElement | null;
+  return timeValueToMinute(el?.value ?? '', 23 * 60);
+}
+
+function readQuietEndMinute(): number {
+  const el = document.querySelector('#setting-quiet-end') as HTMLInputElement | null;
+  return timeValueToMinute(el?.value ?? '', 7 * 60);
+}
+
+function readHotkey(id: string): string {
+  const el = document.querySelector(id) as HTMLInputElement | null;
+  return el?.value ?? '';
+}
+
+function readOverlayMetrics(): string[] {
+  const selected = Array.from(
+    document.querySelectorAll<HTMLInputElement>('.metric-checks input[data-metric]:checked'),
+  )
+    .map((input) => input.dataset.metric ?? '')
+    .filter((id) => DEFAULT_OVERLAY_METRICS.includes(id));
+  return selected.length ? selected : [...DEFAULT_OVERLAY_METRICS];
 }
 
 function readNotificationEnabled(): boolean {
@@ -915,14 +1079,16 @@ function readSettingsForm(): AlertThresholds | null {
   const memory = document.querySelector('#setting-memory') as HTMLInputElement | null;
   const temp = document.querySelector('#setting-temp') as HTMLInputElement | null;
   const disk = document.querySelector('#setting-disk') as HTMLInputElement | null;
+  const gpu = document.querySelector('#setting-gpu') as HTMLInputElement | null;
   const cooldown = document.querySelector('#setting-cooldown') as HTMLInputElement | null;
-  if (!cpu || !memory || !temp || !disk || !cooldown) return null;
+  if (!cpu || !memory || !temp || !disk || !gpu || !cooldown) return null;
 
   const thresholds: AlertThresholds = {
     cpuPercent: Number(cpu.value),
     memoryPercent: Number(memory.value),
     cpuTempCelsius: Number(temp.value),
     diskPercent: Number(disk.value),
+    gpuPercent: Number(gpu.value),
     cooldownSecs: Number(cooldown.value),
   };
 
@@ -931,6 +1097,7 @@ function readSettingsForm(): AlertThresholds | null {
     !Number.isFinite(thresholds.memoryPercent) ||
     !Number.isFinite(thresholds.cpuTempCelsius) ||
     !Number.isFinite(thresholds.diskPercent) ||
+    !Number.isFinite(thresholds.gpuPercent) ||
     !Number.isFinite(thresholds.cooldownSecs)
   ) {
     return null;
@@ -951,6 +1118,14 @@ interface AppliedSettings {
   overlayClickThrough: boolean;
   overlayStyle: string;
   processTopEnabled: boolean;
+  alertSustainSecs: number;
+  quietHoursEnabled: boolean;
+  quietStartMinute: number;
+  quietEndMinute: number;
+  hotkeyPanel: string;
+  hotkeyOverlay: string;
+  hotkeyClickThrough: string;
+  overlayMetrics: string[];
 }
 
 async function loadSettingsForm() {
@@ -969,6 +1144,14 @@ async function loadSettingsForm() {
     overlayClickThrough: cfg.overlayClickThrough,
     overlayStyle: normalizeOverlayStyle(cfg.overlayStyle),
     processTopEnabled,
+    alertSustainSecs: cfg.alertSustainSecs,
+    quietHoursEnabled: cfg.quietHoursEnabled,
+    quietStartMinute: cfg.quietStartMinute,
+    quietEndMinute: cfg.quietEndMinute,
+    hotkeyPanel: cfg.hotkeyPanel,
+    hotkeyOverlay: cfg.hotkeyOverlay,
+    hotkeyClickThrough: cfg.hotkeyClickThrough,
+    overlayMetrics: cfg.overlayMetrics,
   });
   updateChartHint(historyRangeMinutes);
   await refreshTempSourceStatus();
@@ -991,6 +1174,14 @@ function fillSettingsFormFromApplied(applied: AppliedSettings) {
     overlayClickThrough: applied.overlayClickThrough,
     overlayStyle: normalizeOverlayStyle(applied.overlayStyle),
     processTopEnabled,
+    alertSustainSecs: applied.alertSustainSecs,
+    quietHoursEnabled: applied.quietHoursEnabled,
+    quietStartMinute: applied.quietStartMinute,
+    quietEndMinute: applied.quietEndMinute,
+    hotkeyPanel: applied.hotkeyPanel,
+    hotkeyOverlay: applied.hotkeyOverlay,
+    hotkeyClickThrough: applied.hotkeyClickThrough,
+    overlayMetrics: applied.overlayMetrics,
   });
   if (processTopEnabled) {
     void refreshProcessTop(true);
@@ -1080,6 +1271,11 @@ function bindSettingsUi() {
     });
   });
 
+  const exportBtn = document.querySelector('#btn-export-csv') as HTMLButtonElement | null;
+  exportBtn?.addEventListener('click', () => {
+    void exportMetricsCsv(exportBtn);
+  });
+
   document.querySelectorAll<HTMLButtonElement>('.hint-toggle').forEach((btn) => {
     btn.addEventListener('click', () => {
       const card = btn.closest('.settings-card');
@@ -1117,6 +1313,14 @@ function bindSettingsUi() {
           overlayClickThrough: readOverlayClickThrough(),
           overlayStyle: readOverlayStyle(),
           processTopEnabled: readProcessTopEnabled(),
+          alertSustainSecs: readAlertSustainSecs(),
+          quietHoursEnabled: readQuietHoursEnabled(),
+          quietStartMinute: readQuietStartMinute(),
+          quietEndMinute: readQuietEndMinute(),
+          hotkeyPanel: readHotkey('#setting-hotkey-panel'),
+          hotkeyOverlay: readHotkey('#setting-hotkey-overlay'),
+          hotkeyClickThrough: readHotkey('#setting-hotkey-click-through'),
+          overlayMetrics: readOverlayMetrics(),
         },
       });
       fillSettingsFormFromApplied(applied);
@@ -1154,6 +1358,27 @@ function bindSettingsUi() {
   });
 }
 
+async function exportMetricsCsv(button: HTMLButtonElement) {
+  const previousTitle = button.title;
+  try {
+    const csv = await invoke<string>('export_metrics_csv');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'sysmon-history.csv';
+    link.rel = 'noopener';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    button.title = previousTitle;
+  } catch (error) {
+    console.error('导出 CSV 失败', error);
+    button.title = '导出失败';
+  }
+}
+
 async function bootstrapHistoryHint() {
   try {
     const cfg = await invoke<AppConfig>('get_app_config');
@@ -1188,7 +1413,19 @@ async function ensureFrontendNotificationPermission() {
   }
 }
 
+async function showAppVersion() {
+  const el = document.querySelector('#app-version');
+  if (!el) return;
+  try {
+    el.textContent = `v${await getVersion()}`;
+  } catch (error) {
+    console.error('读取应用版本失败', error);
+    el.textContent = '';
+  }
+}
+
 window.addEventListener('DOMContentLoaded', () => {
+  void showAppVersion();
   bindSettingsUi();
   void bootstrapHistoryHint();
   void ensureFrontendNotificationPermission();

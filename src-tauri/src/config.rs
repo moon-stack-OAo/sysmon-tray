@@ -49,6 +49,112 @@ fn default_process_top_enabled() -> bool {
     false
 }
 
+fn default_alert_sustain_secs() -> u64 {
+    5
+}
+
+fn default_quiet_hours_enabled() -> bool {
+    false
+}
+
+fn default_quiet_start_minute() -> u16 {
+    23 * 60
+}
+
+fn default_quiet_end_minute() -> u16 {
+    7 * 60
+}
+
+fn default_hotkey_panel() -> String {
+    "Alt+Shift+S".to_string()
+}
+
+fn default_hotkey_overlay() -> String {
+    "Alt+Shift+O".to_string()
+}
+
+fn default_hotkey_click_through() -> String {
+    "Alt+Shift+C".to_string()
+}
+
+fn default_overlay_metrics() -> Vec<String> {
+    vec![
+        "cpu".to_string(),
+        "mem".to_string(),
+        "temp".to_string(),
+        "gpu".to_string(),
+        "net".to_string(),
+    ]
+}
+
+const OVERLAY_METRIC_IDS: &[&str] = &["cpu", "mem", "temp", "gpu", "net"];
+
+pub fn normalize_overlay_metrics(raw: &[String]) -> Vec<String> {
+    let mut seen = Vec::new();
+    for item in raw {
+        let id = item.trim().to_ascii_lowercase();
+        if OVERLAY_METRIC_IDS.contains(&id.as_str()) && !seen.iter().any(|s: &String| s == &id) {
+            seen.push(id);
+        }
+    }
+    if seen.is_empty() {
+        default_overlay_metrics()
+    } else {
+        seen
+    }
+}
+
+pub fn validate_alert_sustain_secs(secs: u64) -> Result<(), String> {
+    if secs > 120 {
+        Err("告警持续秒数须在 0–120".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+pub fn validate_quiet_minute(minute: u16, label: &str) -> Result<(), String> {
+    if minute > 1439 {
+        Err(format!("{label}须在 0–1439"))
+    } else {
+        Ok(())
+    }
+}
+
+const HOTKEY_MODIFIERS: &[&str] = &["Ctrl", "Alt", "Shift", "Super", "Cmd", "Option"];
+
+pub fn validate_hotkey(raw: &str) -> Result<(), String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let parts: Vec<&str> = trimmed.split('+').collect();
+    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+        return Err("快捷键格式无效".to_string());
+    }
+    for part in parts {
+        if HOTKEY_MODIFIERS.iter().any(|m| part.eq_ignore_ascii_case(m)) {
+            continue;
+        }
+        if part.len() == 1 {
+            let ch = part.chars().next().unwrap();
+            if ch.is_ascii_alphanumeric() {
+                continue;
+            }
+        }
+        if let Some(n) = part
+            .strip_prefix('F')
+            .or_else(|| part.strip_prefix('f'))
+            .and_then(|rest| rest.parse::<u8>().ok())
+        {
+            if (1..=12).contains(&n) && part.len() <= 3 {
+                continue;
+            }
+        }
+        return Err(format!("快捷键包含无效按键：{part}"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum OverlayStyle {
@@ -133,6 +239,30 @@ pub struct AppConfig {
     /// 是否启用主面板进程 Top N（默认关，开启后约 4s 降频刷新）
     #[serde(default = "default_process_top_enabled")]
     pub process_top_enabled: bool,
+    /// 指标越过触发线后需持续这么多秒才发通知；0 表示立即通知
+    #[serde(default = "default_alert_sustain_secs")]
+    pub alert_sustain_secs: u64,
+    /// 安静时段内仍更新告警状态，但不发系统通知、不记账冷却
+    #[serde(default = "default_quiet_hours_enabled")]
+    pub quiet_hours_enabled: bool,
+    /// 安静时段开始（本地分钟，0–1439）
+    #[serde(default = "default_quiet_start_minute")]
+    pub quiet_start_minute: u16,
+    /// 安静时段结束（本地分钟，0–1439）；小于开始表示跨午夜
+    #[serde(default = "default_quiet_end_minute")]
+    pub quiet_end_minute: u16,
+    /// 显示/隐藏主面板。空字符串表示禁用
+    #[serde(default = "default_hotkey_panel")]
+    pub hotkey_panel: String,
+    /// 开关叠加层。空字符串表示禁用
+    #[serde(default = "default_hotkey_overlay")]
+    pub hotkey_overlay: String,
+    /// 翻转叠加层鼠标穿透。空字符串表示禁用
+    #[serde(default = "default_hotkey_click_through")]
+    pub hotkey_click_through: String,
+    /// 叠加层展示的指标 id：cpu / mem / temp / gpu / net
+    #[serde(default = "default_overlay_metrics")]
+    pub overlay_metrics: Vec<String>,
     /// 主面板窗口物理坐标 X（None 表示首次按托盘定位）
     #[serde(default)]
     pub main_x: Option<i32>,
@@ -167,6 +297,14 @@ impl Default for AppConfig {
             overlay_click_through: default_overlay_click_through(),
             overlay_style: default_overlay_style(),
             process_top_enabled: default_process_top_enabled(),
+            alert_sustain_secs: default_alert_sustain_secs(),
+            quiet_hours_enabled: default_quiet_hours_enabled(),
+            quiet_start_minute: default_quiet_start_minute(),
+            quiet_end_minute: default_quiet_end_minute(),
+            hotkey_panel: default_hotkey_panel(),
+            hotkey_overlay: default_hotkey_overlay(),
+            hotkey_click_through: default_hotkey_click_through(),
+            overlay_metrics: default_overlay_metrics(),
             main_x: None,
             main_y: None,
             overlay_x: None,
@@ -227,6 +365,25 @@ impl AppConfig {
             eprintln!("告警阈值配置无效（{err}），已回退默认阈值");
             cfg.alert = AlertThresholds::default();
         }
+        if validate_alert_sustain_secs(cfg.alert_sustain_secs).is_err() {
+            cfg.alert_sustain_secs = default_alert_sustain_secs();
+        }
+        if validate_quiet_minute(cfg.quiet_start_minute, "安静开始").is_err() {
+            cfg.quiet_start_minute = default_quiet_start_minute();
+        }
+        if validate_quiet_minute(cfg.quiet_end_minute, "安静结束").is_err() {
+            cfg.quiet_end_minute = default_quiet_end_minute();
+        }
+        if validate_hotkey(&cfg.hotkey_panel).is_err() {
+            cfg.hotkey_panel = default_hotkey_panel();
+        }
+        if validate_hotkey(&cfg.hotkey_overlay).is_err() {
+            cfg.hotkey_overlay = default_hotkey_overlay();
+        }
+        if validate_hotkey(&cfg.hotkey_click_through).is_err() {
+            cfg.hotkey_click_through = default_hotkey_click_through();
+        }
+        cfg.overlay_metrics = normalize_overlay_metrics(&cfg.overlay_metrics);
         Ok(cfg)
     }
 

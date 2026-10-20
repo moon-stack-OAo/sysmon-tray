@@ -7,15 +7,17 @@ mod temperature_lhm;
 
 use alert::{AlertEngine, AlertKind, AlertStatus, AlertThresholds, SharedAlerts};
 use config::{
-    mutate_config, normalize_lhm_base_url, AppConfig, OverlayEdgeX, OverlayEdgeY, OverlayStyle,
+    mutate_config, normalize_lhm_base_url, normalize_overlay_metrics, validate_alert_sustain_secs,
+    validate_hotkey, validate_quiet_minute, AppConfig, OverlayEdgeX, OverlayEdgeY, OverlayStyle,
     SharedConfig, DEFAULT_LHM_BASE_URL,
 };
-use history::{history_capacity_for_minutes, HistoryPoint};
+use history::{history_capacity_for_minutes, history_to_csv, HistoryPoint};
 use monitor::{
     sample_cached_shared, sample_process_top_shared, Metrics, MonitorState, ProcessTopSnapshot,
     SharedMonitor,
     SharedTemperature, METRICS_CACHE_MIN_INTERVAL,
 };
+use chrono::Timelike;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,6 +28,7 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, Manager, Monitor, PhysicalPosition, PhysicalSize, RunEvent,
     WindowEvent,
 };
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
 use temperature::ChainedTemperatureProvider;
 use temperature_lhm::{LhmExtras, LhmRuntimeConfig, SharedLhmExtras, TempSourceKind, TempSourceTracker};
@@ -41,6 +44,7 @@ pub struct SharedOverlayPosDebounce(pub AtomicBool);
 pub struct SharedMainPosSave(pub Mutex<Option<Instant>>);
 pub struct SharedMainLastMove(pub Mutex<Option<Instant>>);
 pub struct SharedMainPosDebounce(pub AtomicBool);
+pub type SharedTrayAlert = Mutex<bool>;
 
 const OVERLAY_SNAP_THRESHOLD_PX: i32 = 36;
 const OVERLAY_SNAP_CORNER_BONUS_PX: i32 = 12;
@@ -166,18 +170,22 @@ fn get_metrics(
 
     let temp_source = tracker.get().as_str().to_string();
 
+    let (notification_enabled, sustain_secs, quiet) = {
+        let cfg = config.lock().map_err(|e| e.to_string())?;
+        (
+            cfg.notification_enabled,
+            cfg.alert_sustain_secs,
+            quiet_hours_active(&cfg),
+        )
+    };
+
     let (alert, newly_fired) = {
         let mut engine = alerts.lock().map_err(|e| e.to_string())?;
-        engine.evaluate(&metrics)
+        engine.evaluate(&metrics, Duration::from_secs(sustain_secs))
     };
 
-    let notification_enabled = {
-        let cfg = config.lock().map_err(|e| e.to_string())?;
-        cfg.notification_enabled
-    };
-
-    // 通知关闭或 show 失败都不记账，打开通知后下一次超阈值仍会响
-    if notification_enabled && send_alert_notification(&app, &newly_fired) {
+    // 安静时段仍保留横幅/tooltip，但不发通知、不记账，时段结束后下一次仍能响
+    if notification_enabled && !quiet && send_alert_notification(&app, &newly_fired) {
         let kinds: Vec<AlertKind> = newly_fired.iter().map(|(kind, _)| *kind).collect();
         let mut engine = alerts.lock().map_err(|e| e.to_string())?;
         engine.mark_fired(&kinds);
@@ -185,6 +193,7 @@ fn get_metrics(
 
     if let Some(tray) = app.tray_by_id("main") {
         let _ = tray.set_tooltip(Some(alert.tooltip_text()));
+        sync_tray_alert_icon(&app, &tray, alert.active);
     }
 
     Ok(MetricsResponse {
@@ -192,6 +201,86 @@ fn get_metrics(
         alert,
         temp_source,
     })
+}
+
+fn local_minute_of_day() -> u16 {
+    let now = chrono::Local::now();
+    now.time().hour() as u16 * 60 + now.time().minute() as u16
+}
+
+fn quiet_hours_active(cfg: &AppConfig) -> bool {
+    if !cfg.quiet_hours_enabled {
+        return false;
+    }
+    let now = local_minute_of_day();
+    let start = cfg.quiet_start_minute;
+    let end = cfg.quiet_end_minute;
+    if start == end {
+        return true;
+    }
+    if start < end {
+        now >= start && now < end
+    } else {
+        now >= start || now < end
+    }
+}
+
+const TRAY_ICON_SIZE: u32 = 32;
+
+fn tray_icon_rgba(alert: bool) -> Vec<u8> {
+    let (r, g, b) = if alert {
+        (220u8, 80, 80)
+    } else {
+        (88u8, 196, 196)
+    };
+    let size = TRAY_ICON_SIZE as i32;
+    let center = (size - 1) as f32 / 2.0;
+    let radius = center - 1.0;
+    let mut rgba = vec![0u8; (size * size * 4) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 - center;
+            let dy = y as f32 - center;
+            if dx * dx + dy * dy <= radius * radius {
+                let i = ((y * size + x) * 4) as usize;
+                rgba[i] = r;
+                rgba[i + 1] = g;
+                rgba[i + 2] = b;
+                rgba[i + 3] = 255;
+            }
+        }
+    }
+    rgba
+}
+
+fn sync_tray_alert_icon(app: &tauri::AppHandle, tray: &tauri::tray::TrayIcon<tauri::Wry>, active: bool) {
+    let changed = match app.state::<SharedTrayAlert>().lock() {
+        Ok(mut last) => {
+            if *last == active {
+                false
+            } else {
+                *last = active;
+                true
+            }
+        }
+        Err(err) => {
+            eprintln!("读取托盘告警状态失败: {err}");
+            false
+        }
+    };
+    if !changed {
+        return;
+    }
+    let image = tauri::image::Image::new_owned(tray_icon_rgba(active), TRAY_ICON_SIZE, TRAY_ICON_SIZE);
+    if let Err(err) = tray.set_icon(Some(image)) {
+        eprintln!("更新托盘图标失败: {err}");
+    }
+}
+
+#[tauri::command]
+fn export_metrics_csv(monitor: tauri::State<'_, SharedMonitor>) -> Result<String, String> {
+    let monitor = monitor.lock().map_err(|e| e.to_string())?;
+    Ok(history_to_csv(&monitor.history_snapshot()))
 }
 
 #[tauri::command]
@@ -365,10 +454,19 @@ struct SettingsInput {
     overlay_click_through: bool,
     overlay_style: String,
     process_top_enabled: bool,
+    alert_sustain_secs: u64,
+    quiet_hours_enabled: bool,
+    quiet_start_minute: u16,
+    quiet_end_minute: u16,
+    hotkey_panel: String,
+    hotkey_overlay: String,
+    hotkey_click_through: String,
+    overlay_metrics: Vec<String>,
 }
 
 impl SettingsInput {
     fn defaults() -> Self {
+        let cfg = AppConfig::default();
         Self {
             thresholds: AlertThresholds::default(),
             notification_enabled: true,
@@ -381,6 +479,14 @@ impl SettingsInput {
             overlay_click_through: false,
             overlay_style: "capsule".to_string(),
             process_top_enabled: false,
+            alert_sustain_secs: cfg.alert_sustain_secs,
+            quiet_hours_enabled: cfg.quiet_hours_enabled,
+            quiet_start_minute: cfg.quiet_start_minute,
+            quiet_end_minute: cfg.quiet_end_minute,
+            hotkey_panel: cfg.hotkey_panel,
+            hotkey_overlay: cfg.hotkey_overlay,
+            hotkey_click_through: cfg.hotkey_click_through,
+            overlay_metrics: cfg.overlay_metrics,
         }
     }
 }
@@ -399,6 +505,14 @@ struct SettingsResponse {
     overlay_click_through: bool,
     overlay_style: String,
     process_top_enabled: bool,
+    alert_sustain_secs: u64,
+    quiet_hours_enabled: bool,
+    quiet_start_minute: u16,
+    quiet_end_minute: u16,
+    hotkey_panel: String,
+    hotkey_overlay: String,
+    hotkey_click_through: String,
+    overlay_metrics: Vec<String>,
 }
 
 /// 设置页聚合保存：全部校验与可失败操作通过后仅落盘一次，避免中途失败导致部分生效
@@ -414,6 +528,13 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
     let capacity = history_capacity_for_minutes(input.history_range_minutes)?;
     let parsed_style =
         OverlayStyle::parse(&input.overlay_style).ok_or_else(|| "无效的叠加层形态".to_string())?;
+    validate_alert_sustain_secs(input.alert_sustain_secs)?;
+    validate_quiet_minute(input.quiet_start_minute, "安静开始")?;
+    validate_quiet_minute(input.quiet_end_minute, "安静结束")?;
+    validate_hotkey(&input.hotkey_panel)?;
+    validate_hotkey(&input.hotkey_overlay)?;
+    validate_hotkey(&input.hotkey_click_through)?;
+    let overlay_metrics = normalize_overlay_metrics(&input.overlay_metrics);
 
     // 外部可失败操作（通知权限、自启）在落盘前；落盘后的内存副作用失败只打日志
     if input.notification_enabled && !ensure_notification_permission(app) {
@@ -444,6 +565,14 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
         next.overlay_click_through = input.overlay_click_through;
         next.overlay_style = parsed_style;
         next.process_top_enabled = input.process_top_enabled;
+        next.alert_sustain_secs = input.alert_sustain_secs;
+        next.quiet_hours_enabled = input.quiet_hours_enabled;
+        next.quiet_start_minute = input.quiet_start_minute;
+        next.quiet_end_minute = input.quiet_end_minute;
+        next.hotkey_panel = input.hotkey_panel.trim().to_string();
+        next.hotkey_overlay = input.hotkey_overlay.trim().to_string();
+        next.hotkey_click_through = input.hotkey_click_through.trim().to_string();
+        next.overlay_metrics = overlay_metrics.clone();
         if let Some(pos) = overlay_pos {
             next.overlay_x = Some(pos.x);
             next.overlay_y = Some(pos.y);
@@ -463,6 +592,10 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
     lhm.set_enabled(input.precise_temp_enabled);
     lhm.set_base_url(normalized_lhm.clone());
 
+    if let Ok(cfg) = config.lock() {
+        sync_hotkeys(app, &cfg);
+    }
+
     if input.overlay_enabled {
         show_overlay_window(app);
     } else {
@@ -473,6 +606,7 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
     let _ = app.emit("overlay-auto-hide-changed", input.overlay_auto_hide);
     let _ = app.emit("overlay-click-through-changed", input.overlay_click_through);
     let _ = app.emit("overlay-style-changed", parsed_style.as_str());
+    let _ = app.emit("overlay-metrics-changed", overlay_metrics.clone());
 
     if input.notification_enabled {
         // 测试通知失败不影响保存结果
@@ -499,6 +633,14 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
         overlay_click_through: input.overlay_click_through,
         overlay_style: parsed_style.as_str().to_string(),
         process_top_enabled: input.process_top_enabled,
+        alert_sustain_secs: input.alert_sustain_secs,
+        quiet_hours_enabled: input.quiet_hours_enabled,
+        quiet_start_minute: input.quiet_start_minute,
+        quiet_end_minute: input.quiet_end_minute,
+        hotkey_panel: input.hotkey_panel.trim().to_string(),
+        hotkey_overlay: input.hotkey_overlay.trim().to_string(),
+        hotkey_click_through: input.hotkey_click_through.trim().to_string(),
+        overlay_metrics,
     })
 }
 
@@ -1430,6 +1572,65 @@ fn hide_panel(app: &tauri::AppHandle) {
     }
 }
 
+fn register_hotkey(app: &AppHandle, accelerator: &str, id: &'static str) {
+    let trimmed = accelerator.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let shortcut = match trimmed.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+        Ok(shortcut) => shortcut,
+        Err(err) => {
+            eprintln!("快捷键 {id} 无法解析（{trimmed}）: {err}");
+            return;
+        }
+    };
+    if let Err(err) = app.global_shortcut().on_shortcut(shortcut, move |app, _shortcut, event| {
+        if event.state != ShortcutState::Pressed {
+            return;
+        }
+        match id {
+            "panel" => toggle_panel(app, None),
+            "overlay" => {
+                let currently = app
+                    .state::<SharedConfig>()
+                    .lock()
+                    .map(|cfg| cfg.overlay_enabled)
+                    .unwrap_or(false);
+                if let Err(err) = apply_overlay_enabled(app, !currently) {
+                    eprintln!("快捷键切换叠加层失败: {err}");
+                }
+            }
+            "click_through" => {
+                let next = app
+                    .state::<SharedConfig>()
+                    .lock()
+                    .map(|cfg| !cfg.overlay_click_through)
+                    .unwrap_or(false);
+                if let Err(err) = mutate_config(&app.state::<SharedConfig>(), |cfg| {
+                    cfg.overlay_click_through = next;
+                    Ok(())
+                }) {
+                    eprintln!("快捷键切换穿透失败: {err}");
+                    return;
+                }
+                let _ = app.emit("overlay-click-through-changed", next);
+            }
+            _ => {}
+        }
+    }) {
+        eprintln!("注册快捷键 {id}（{trimmed}）失败: {err}");
+    }
+}
+
+fn sync_hotkeys(app: &AppHandle, cfg: &AppConfig) {
+    if let Err(err) = app.global_shortcut().unregister_all() {
+        eprintln!("清除快捷键失败: {err}");
+    }
+    register_hotkey(app, &cfg.hotkey_panel, "panel");
+    register_hotkey(app, &cfg.hotkey_overlay, "overlay");
+    register_hotkey(app, &cfg.hotkey_click_through, "click_through");
+}
+
 fn toggle_panel(app: &tauri::AppHandle, tray_rect: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>) {
     if let Some(window) = app.get_webview_window("main") {
         if window.is_visible().unwrap_or(false) {
@@ -1474,6 +1675,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(
             Mutex::new(MonitorState::with_history_capacity(history_capacity)) as SharedMonitor,
         )
@@ -1489,12 +1691,14 @@ pub fn run() {
         .manage(SharedMainPosSave(Mutex::new(None)))
         .manage(SharedMainLastMove(Mutex::new(None)))
         .manage(SharedMainPosDebounce(AtomicBool::new(false)))
+        .manage(Mutex::new(false) as SharedTrayAlert)
         .manage(lhm_runtime as SharedLhmRuntime)
         .manage(temp_tracker as SharedTempTracker)
         .manage(lhm_extras)
         .invoke_handler(tauri::generate_handler![
             get_metrics,
             get_metrics_history,
+            export_metrics_csv,
             get_process_top,
             set_process_top_enabled,
             get_alert_thresholds,
@@ -1519,6 +1723,9 @@ pub fn run() {
         ])
         .setup(|app| {
             sync_autostart_with_config(app.handle());
+            if let Ok(cfg) = app.state::<SharedConfig>().lock() {
+                sync_hotkeys(app.handle(), &cfg);
+            }
 
             let overlay_enabled = app
                 .state::<SharedConfig>()

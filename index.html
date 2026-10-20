@@ -10,7 +10,7 @@
   <body>
     <main class="panel">
       <header class="panel-header" data-tauri-drag-region>
-        <h1 data-tauri-drag-region>系统监测</h1>
+        <h1 data-tauri-drag-region>系统监测 <span id="app-version" class="app-version muted">v--</span></h1>
         <span id="updated-at" class="muted" data-tauri-drag-region>--</span>
       </header>
 
@@ -92,6 +92,7 @@
             <span class="chart-legend">
               <span class="legend-item cpu">CPU</span>
               <span class="legend-item mem">内存</span>
+              <span class="legend-item gpu" id="gpu-legend" hidden>GPU</span>
               <span class="legend-item temp" id="temp-legend">温度</span>
               <span class="legend-item fan" id="fan-legend" hidden>风扇</span>
             </span>
@@ -102,6 +103,7 @@
             <div class="chart-readings">
               <span class="cpu" id="chart-cpu-reading">CPU --</span>
               <span class="mem" id="chart-mem-reading">内存 --</span>
+              <span class="gpu" id="chart-gpu-reading" hidden>GPU --</span>
               <span class="temp" id="chart-temp-reading" hidden>温度 --</span>
               <span class="fan" id="chart-fan-reading" hidden>风扇 --</span>
             </div>
@@ -111,6 +113,7 @@
         <section class="metric-card compact-card">
           <div class="metric-top">
             <span class="metric-label">网络</span>
+            <span id="net-interface" class="muted net-interface">--</span>
           </div>
           <div class="net-row">
             <div class="net-cell">
@@ -127,6 +130,9 @@
         <section class="metric-card compact-card">
           <div class="metric-top">
             <span class="metric-label">磁盘</span>
+            <button type="button" id="btn-export-csv" class="btn tiny" title="导出历史 CSV">
+              导出 CSV
+            </button>
           </div>
           <div id="disk-list" class="disk-list muted">加载中...</div>
         </section>
@@ -178,10 +184,21 @@
                 </label>
 
                 <label class="field">
+                  <span class="field-label">GPU（%）</span>
+                  <input id="setting-gpu" type="number" min="1" max="100" step="1" required />
+                </label>
+
+                <label class="field">
                   <span class="field-label">冷却（秒）</span>
                   <input id="setting-cooldown" type="number" min="5" max="3600" step="1" required />
                 </label>
+
+                <label class="field">
+                  <span class="field-label">持续（秒）</span>
+                  <input id="setting-sustain" type="number" min="0" max="120" step="1" required />
+                </label>
               </div>
+              <p class="settings-hint muted">短尖峰需持续这么久才通知。</p>
             </section>
 
             <section class="metric-card settings-card">
@@ -196,6 +213,60 @@
                     <span class="toggle-track"></span>
                   </span>
                 </label>
+
+                <label class="field switch-field">
+                  <span class="field-label">安静时段</span>
+                  <span class="toggle">
+                    <input id="setting-quiet-enabled" type="checkbox" />
+                    <span class="toggle-track"></span>
+                  </span>
+                </label>
+
+                <div class="settings-grid">
+                  <label class="field">
+                    <span class="field-label">开始</span>
+                    <input id="setting-quiet-start" type="time" value="23:00" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">结束</span>
+                    <input id="setting-quiet-end" type="time" value="07:00" />
+                  </label>
+                </div>
+                <p class="settings-hint muted">可跨午夜，例如 23:00–07:00。</p>
+
+                <label class="field">
+                  <span class="field-label">面板快捷键</span>
+                  <input
+                    id="setting-hotkey-panel"
+                    type="text"
+                    spellcheck="false"
+                    autocomplete="off"
+                    placeholder="Alt+Shift+S"
+                  />
+                </label>
+                <label class="field">
+                  <span class="field-label">叠加层快捷键</span>
+                  <input
+                    id="setting-hotkey-overlay"
+                    type="text"
+                    spellcheck="false"
+                    autocomplete="off"
+                    placeholder="Alt+Shift+O"
+                  />
+                </label>
+                <label class="field">
+                  <span class="field-label">穿透快捷键</span>
+                  <input
+                    id="setting-hotkey-click-through"
+                    type="text"
+                    spellcheck="false"
+                    autocomplete="off"
+                    placeholder="Alt+Shift+C"
+                  />
+                </label>
+                <p class="settings-hint muted">
+                  Alt+Shift+S 显示面板，Alt+Shift+O 叠加层，Alt+Shift+C 穿透；留空则禁用。
+                </p>
 
                 <label class="field switch-field">
                   <span class="field-label">启用叠加层</span>
@@ -237,6 +308,32 @@
                   </span>
                 </label>
                 <p class="settings-hint muted">开启后默认点穿桌面，鼠标移到叠加层上可操作</p>
+
+                <div class="field">
+                  <span class="field-label">叠加层指标</span>
+                  <div class="metric-checks">
+                    <label class="check-field">
+                      <input type="checkbox" data-metric="cpu" checked />
+                      <span>CPU</span>
+                    </label>
+                    <label class="check-field">
+                      <input type="checkbox" data-metric="mem" checked />
+                      <span>内存</span>
+                    </label>
+                    <label class="check-field">
+                      <input type="checkbox" data-metric="temp" checked />
+                      <span>温度</span>
+                    </label>
+                    <label class="check-field">
+                      <input type="checkbox" data-metric="gpu" checked />
+                      <span>GPU</span>
+                    </label>
+                    <label class="check-field">
+                      <input type="checkbox" data-metric="net" checked />
+                      <span>网络</span>
+                    </label>
+                  </div>
+                </div>
 
                 <label class="field">
                   <span class="field-label">叠加层形态</span>

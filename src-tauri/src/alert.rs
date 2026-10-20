@@ -16,9 +16,14 @@ pub enum AlertKind {
     Memory,
     Temperature,
     Disk,
+    Gpu,
 }
 
 fn default_disk_percent() -> f32 {
+    90.0
+}
+
+fn default_gpu_percent() -> f32 {
     90.0
 }
 
@@ -34,6 +39,9 @@ pub struct AlertThresholds {
     /// 磁盘占用阈值（%）；任一盘达到即告警
     #[serde(default = "default_disk_percent")]
     pub disk_percent: f32,
+    /// GPU 占用阈值（%）；无读数时跳过
+    #[serde(default = "default_gpu_percent")]
+    pub gpu_percent: f32,
     /// 同类告警冷却秒数
     pub cooldown_secs: u64,
 }
@@ -45,6 +53,7 @@ impl Default for AlertThresholds {
             memory_percent: 90.0,
             cpu_temp_celsius: 85.0,
             disk_percent: default_disk_percent(),
+            gpu_percent: default_gpu_percent(),
             cooldown_secs: DEFAULT_COOLDOWN_SECS,
         }
     }
@@ -65,6 +74,9 @@ impl AlertThresholds {
         if !(1.0..=100.0).contains(&self.disk_percent) {
             return Err("磁盘阈值须在 1–100".to_string());
         }
+        if !(1.0..=100.0).contains(&self.gpu_percent) {
+            return Err("GPU 阈值须在 1–100".to_string());
+        }
         if !(5..=3600).contains(&self.cooldown_secs) {
             return Err("冷却秒数须在 5–3600".to_string());
         }
@@ -79,6 +91,7 @@ pub struct AlertStatus {
     pub memory: bool,
     pub temperature: bool,
     pub disk: bool,
+    pub gpu: bool,
     pub active: bool,
     pub messages: Vec<String>,
     pub thresholds: AlertThresholds,
@@ -98,6 +111,8 @@ pub struct AlertEngine {
     last_fired: HashMap<AlertKind, Instant>,
     /// 已越过触发线；降到解除线以下才清除。latched 期间不再 fire，避免贴线抖动连发。
     latched: HashMap<AlertKind, bool>,
+    /// 首次越过触发线的时刻；持续不足 sustain 时不通知。降到解除线以下清除。
+    exceeded_since: HashMap<AlertKind, Instant>,
 }
 
 impl AlertEngine {
@@ -106,6 +121,7 @@ impl AlertEngine {
             thresholds,
             last_fired: HashMap::new(),
             latched: HashMap::new(),
+            exceeded_since: HashMap::new(),
         }
     }
 
@@ -122,6 +138,7 @@ impl AlertEngine {
     pub fn evaluate(
         &mut self,
         metrics: &Metrics,
+        sustain: Duration,
     ) -> (AlertStatus, Vec<(AlertKind, String)>) {
         let t = self.thresholds.clone();
         let mut messages = Vec::new();
@@ -136,7 +153,7 @@ impl AlertEngine {
         );
         if cpu {
             messages.push(format!("CPU {:.0}%", metrics.cpu_percent));
-            if cpu_rising && self.should_fire(AlertKind::Cpu) {
+            if cpu_rising && self.should_fire(AlertKind::Cpu, sustain) {
                 newly_fired.push((
                     AlertKind::Cpu,
                     format!(
@@ -157,7 +174,7 @@ impl AlertEngine {
         );
         if memory {
             messages.push(format!("内存 {:.0}%", metrics.memory_percent));
-            if memory_rising && self.should_fire(AlertKind::Memory) {
+            if memory_rising && self.should_fire(AlertKind::Memory, sustain) {
                 newly_fired.push((
                     AlertKind::Memory,
                     format!(
@@ -179,7 +196,7 @@ impl AlertEngine {
                 );
                 if active {
                     messages.push(format!("温度 {:.0}°C", temp));
-                    if rising && self.should_fire(AlertKind::Temperature) {
+                    if rising && self.should_fire(AlertKind::Temperature, sustain) {
                         newly_fired.push((
                             AlertKind::Temperature,
                             format!(
@@ -236,20 +253,51 @@ impl AlertEngine {
                 };
                 messages.push(format!("{mount} {:.0}%", d.used_percent));
             }
-            if disk_rising && self.should_fire(AlertKind::Disk) {
+            if disk_rising && self.should_fire(AlertKind::Disk, sustain) {
                 for msg in disk_notify {
                     newly_fired.push((AlertKind::Disk, msg));
                 }
             }
         }
 
-        let active = cpu || memory || temperature || disk;
+        let gpu_load = metrics.gpu.as_ref().and_then(|g| g.load_percent);
+        let gpu = match gpu_load {
+            Some(load) => {
+                let rising = self.rising_edge(AlertKind::Gpu, load, t.gpu_percent);
+                let active = self.observe(
+                    AlertKind::Gpu,
+                    load,
+                    t.gpu_percent,
+                    HYSTERESIS_PERCENT,
+                );
+                if active {
+                    messages.push(format!("GPU {:.0}%", load));
+                    if rising && self.should_fire(AlertKind::Gpu, sustain) {
+                        newly_fired.push((
+                            AlertKind::Gpu,
+                            format!(
+                                "GPU 占用过高：{:.1}%（阈值 {:.0}%）",
+                                load, t.gpu_percent
+                            ),
+                        ));
+                    }
+                }
+                active
+            }
+            None => {
+                self.clear_latch(AlertKind::Gpu);
+                false
+            }
+        };
+
+        let active = cpu || memory || temperature || disk || gpu;
         (
             AlertStatus {
                 cpu,
                 memory,
                 temperature,
                 disk,
+                gpu,
                 active,
                 messages,
                 thresholds: t,
@@ -272,6 +320,7 @@ impl AlertEngine {
 
     fn clear_latch(&mut self, kind: AlertKind) {
         self.latched.insert(kind, false);
+        self.exceeded_since.remove(&kind);
     }
 
     /// 本帧从未 latched 跨过触发线。须在 observe 更新 latch 之前调用。
@@ -289,6 +338,10 @@ impl AlertEngine {
             } else {
                 true
             }
+        } else if value < release {
+            // 未越过触发线且已回到解除线以下：丢掉持续计时，避免贴线断续累计
+            self.exceeded_since.remove(&kind);
+            false
         } else if value >= threshold {
             self.latched.insert(kind, true);
             true
@@ -298,7 +351,15 @@ impl AlertEngine {
     }
 
     /// 冷却只限制同一次恢复后的重复触发。不修改 last_fired；latched 期间由 rising_edge 挡住。
-    fn should_fire(&self, kind: AlertKind) -> bool {
+    /// sustain 大于 0 且超过触发线的持续时间不足时，本次不通知也不记账。
+    fn should_fire(&mut self, kind: AlertKind, sustain: Duration) -> bool {
+        if !sustain.is_zero() {
+            let now = Instant::now();
+            let since = self.exceeded_since.entry(kind).or_insert(now);
+            if now.duration_since(*since) < sustain {
+                return false;
+            }
+        }
         let cooldown = Duration::from_secs(self.thresholds.cooldown_secs.max(1));
         match self.last_fired.get(&kind) {
             Some(last) if last.elapsed() < cooldown => false,

@@ -40,6 +40,10 @@ pub struct Metrics {
     pub swap_total_bytes: u64,
     pub net_down_bps: u64,
     pub net_up_bps: u64,
+    /// 本帧差分所依据的主接口名（累计收发最大）；全 0 或没有名字时为 None
+    pub net_interface: Option<String>,
+    /// `up` | `down`。仅接口列表为空时为 down；空闲不是断网
+    pub net_link: String,
     pub disks: Vec<DiskStat>,
     pub cpu_temp_celsius: Option<f32>,
     /// 仅 LHM 可用；无可靠低成本回退时为 None
@@ -180,7 +184,7 @@ impl MonitorState {
             (memory_used as f64 / memory_total as f64 * 100.0) as f32
         };
 
-        let disks = self
+            let mut disks: Vec<DiskStat> = self
             .disks
             .iter()
             .map(|disk| {
@@ -202,6 +206,16 @@ impl MonitorState {
                 }
             })
             .collect();
+        disks.sort_by(|a, b| {
+            let a_empty = a.mount_point.trim().is_empty();
+            let b_empty = b.mount_point.trim().is_empty();
+            a_empty.cmp(&b_empty).then_with(|| {
+                a.mount_point
+                    .to_ascii_lowercase()
+                    .cmp(&b.mount_point.to_ascii_lowercase())
+                    .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+            })
+        });
 
         // 间隔过长时差分不代表当前网速，置 0 比沿用陈旧旧值更不易误导，下轮即恢复正常差分。
         // 启动基线未确认时同样置 0：本帧 refresh 可能把累计字节当成增量。
@@ -216,6 +230,13 @@ impl MonitorState {
             )
         };
         self.net_baseline_ready = true;
+
+        let net_interface = primary_interface_name(&self.networks);
+        let net_link = if self.networks.iter().count() == 0 {
+            "down"
+        } else {
+            "up"
+        };
 
         let last_temp = self.last_metrics.as_ref().and_then(|m| m.cpu_temp_celsius);
         let last_gpu = self.last_metrics.as_ref().and_then(|m| m.gpu.clone());
@@ -234,6 +255,8 @@ impl MonitorState {
             swap_total_bytes: self.system.total_swap(),
             net_down_bps,
             net_up_bps,
+            net_interface,
+            net_link: net_link.to_string(),
             disks,
             cpu_temp_celsius: last_temp,
             gpu: last_gpu,
@@ -263,6 +286,29 @@ impl MonitorState {
     pub fn history_snapshot(&self) -> Vec<crate::history::HistoryPoint> {
         self.history.snapshot()
     }
+}
+
+fn primary_interface_name(networks: &Networks) -> Option<String> {
+    let mut best: Option<(&str, u64)> = None;
+    for (name, data) in networks.iter() {
+        if name.is_empty() {
+            continue;
+        }
+        let total = data
+            .total_received()
+            .saturating_add(data.total_transmitted());
+        match best {
+            Some((_, prev)) if prev >= total => {}
+            _ => best = Some((name, total)),
+        }
+    }
+    best.and_then(|(name, total)| {
+        if total == 0 {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    })
 }
 
 fn sum_network(networks: &Networks) -> (u64, u64) {

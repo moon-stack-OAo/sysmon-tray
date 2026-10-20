@@ -65,6 +65,7 @@
   --chart-mem: var(--success);
   --chart-temp: var(--temp);
   --chart-fan: #c084fc;
+  --chart-gpu: #3dd68c;
 
   --glass-bg: var(--glass);
   --glass-card: var(--surface);
@@ -244,6 +245,16 @@ body {
 .view::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.12);
   border-radius: 3px;
+}
+
+.app-version {
+  flex-shrink: 0;
+  margin-top: auto;
+  padding-top: 4px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.3px;
 }
 
 .view::-webkit-scrollbar-thumb:hover {
@@ -508,6 +519,15 @@ body {
   transform: none;
 }
 
+.btn.tiny {
+  min-height: 22px;
+  height: 22px;
+  padding: 0 8px;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
 .settings-divider {
   height: 1px;
   background: var(--border);
@@ -740,10 +760,55 @@ body {
   margin-bottom: 4px;
 }
 
+.net-interface {
+  max-width: 62%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+}
+
 .disk-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  max-height: 132px;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+
+.disk-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.disk-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.disk-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+}
+
+.metric-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.check-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  color: var(--fg-2);
+}
+
+.check-field input {
+  width: auto;
+  height: auto;
+  margin: 0;
 }
 
 .fan-list {
@@ -876,8 +941,13 @@ body {
   background: var(--chart-fan);
 }
 
+.legend-item.gpu::before {
+  background: var(--chart-gpu);
+}
+
 .legend-item.temp[hidden],
-.legend-item.fan[hidden] {
+.legend-item.fan[hidden],
+.legend-item.gpu[hidden] {
   display: none;
 }
 
@@ -918,7 +988,12 @@ body {
   color: var(--chart-fan);
 }
 
+.chart-readings .gpu {
+  color: var(--chart-gpu);
+}
+
 .chart-readings .temp[hidden],
-.chart-readings .fan[hidden] {
+.chart-readings .fan[hidden],
+.chart-readings .gpu[hidden] {
   display: none;
 }
