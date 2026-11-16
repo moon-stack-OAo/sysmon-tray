@@ -1,4 +1,6 @@
 import { getVersion } from '@tauri-apps/api/app';
+import { initializeCodex } from './codex';
+import './codex.css';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
@@ -27,6 +29,7 @@ interface AppConfig {
   preciseTempEnabled: boolean;
   lhmBaseUrl: string;
   overlayEnabled: boolean;
+  codexEnabled: boolean;
   autostartEnabled: boolean;
   overlayAutoHide: boolean;
   overlayClickThrough: boolean;
@@ -239,8 +242,7 @@ function formatFanSummary(fans: FanMetrics[]): string {
 
 function renderFanList(fanList: HTMLElement, fans: FanMetrics[], tempSource: string) {
   if (!fans.length) {
-    fanList.textContent =
-      tempSource === 'lhm' ? '暂不可用' : '需启用 LibreHardwareMonitor';
+    fanList.textContent = tempSource === 'lhm' ? '暂不可用' : '需启用 LibreHardwareMonitor';
     return;
   }
 
@@ -305,9 +307,7 @@ function renderProcessList(
     if (nameEl) nameEl.textContent = `${entry.name}${suffix}`;
     if (metaEl) {
       metaEl.textContent =
-        mode === 'cpu'
-          ? `${entry.cpuPercent.toFixed(1)}%`
-          : formatBytes(entry.memoryBytes);
+        mode === 'cpu' ? `${entry.cpuPercent.toFixed(1)}%` : formatBytes(entry.memoryBytes);
     }
   }
 }
@@ -677,8 +677,7 @@ async function refreshMetrics() {
         swapCard.hidden = true;
       } else {
         swapCard.hidden = false;
-        const swapPercent =
-          (metrics.swapUsedBytes / metrics.swapTotalBytes) * 100;
+        const swapPercent = (metrics.swapUsedBytes / metrics.swapTotalBytes) * 100;
         if (swapValue) swapValue.textContent = `${swapPercent.toFixed(1)}%`;
         setBar(swapBar, swapPercent);
         if (swapDetail) {
@@ -704,9 +703,7 @@ async function refreshMetrics() {
         if (gpu.name) parts.push(gpu.name);
         if (gpu.tempCelsius != null) parts.push(`${gpu.tempCelsius.toFixed(1)} °C`);
         if (gpu.memoryUsedBytes != null && gpu.memoryTotalBytes != null) {
-          parts.push(
-            `${formatBytes(gpu.memoryUsedBytes)} / ${formatBytes(gpu.memoryTotalBytes)}`,
-          );
+          parts.push(`${formatBytes(gpu.memoryUsedBytes)} / ${formatBytes(gpu.memoryTotalBytes)}`);
         } else if (gpu.memoryPercent != null) {
           parts.push(`显存 ${gpu.memoryPercent.toFixed(1)}%`);
         }
@@ -719,9 +716,7 @@ async function refreshMetrics() {
       setBar(gpuBar, 0);
       if (gpuDetail) {
         gpuDetail.textContent =
-          metrics.tempSource === 'lhm'
-            ? '暂不可用'
-            : '需启用 LibreHardwareMonitor';
+          metrics.tempSource === 'lhm' ? '暂不可用' : '需启用 LibreHardwareMonitor';
       }
     }
 
@@ -814,7 +809,15 @@ function normalizeOverlayStyle(
   return 'capsule';
 }
 
-const DEFAULT_OVERLAY_METRICS = ['cpu', 'mem', 'temp', 'gpu', 'net'];
+const DEFAULT_OVERLAY_METRICS = [
+  'cpu',
+  'mem',
+  'temp',
+  'gpu',
+  'net',
+  'codex_primary',
+  'codex_secondary',
+];
 
 function minuteToTimeValue(minute: number): string {
   const clamped = Math.max(0, Math.min(1439, Math.round(minute)));
@@ -841,6 +844,7 @@ interface SettingsFormValues {
   preciseTempEnabled?: boolean;
   lhmBaseUrl?: string;
   overlayEnabled?: boolean;
+  codexEnabled?: boolean;
   autostartEnabled?: boolean;
   overlayAutoHide?: boolean;
   overlayClickThrough?: boolean;
@@ -864,6 +868,7 @@ function fillSettingsForm(values: SettingsFormValues) {
     preciseTempEnabled,
     lhmBaseUrl,
     overlayEnabled,
+    codexEnabled,
     autostartEnabled,
     overlayAutoHide,
     overlayClickThrough,
@@ -887,6 +892,8 @@ function fillSettingsForm(values: SettingsFormValues) {
   const sustain = document.querySelector('#setting-sustain') as HTMLInputElement | null;
   const notification = document.querySelector('#setting-notification') as HTMLInputElement | null;
   const overlay = document.querySelector('#setting-overlay') as HTMLInputElement | null;
+  const codex = document.querySelector('#setting-codex') as HTMLInputElement | null;
+  if (codex && codexEnabled !== undefined) codex.checked = codexEnabled;
   const autostart = document.querySelector('#setting-autostart') as HTMLInputElement | null;
   const overlayAutoHideEl = document.querySelector(
     '#setting-overlay-auto-hide',
@@ -1113,6 +1120,7 @@ interface AppliedSettings {
   preciseTempEnabled: boolean;
   lhmBaseUrl: string;
   overlayEnabled: boolean;
+  codexEnabled: boolean;
   autostartEnabled: boolean;
   overlayAutoHide: boolean;
   overlayClickThrough: boolean;
@@ -1139,6 +1147,7 @@ async function loadSettingsForm() {
     preciseTempEnabled: cfg.preciseTempEnabled,
     lhmBaseUrl: cfg.lhmBaseUrl,
     overlayEnabled: cfg.overlayEnabled,
+    codexEnabled: cfg.codexEnabled,
     autostartEnabled: cfg.autostartEnabled,
     overlayAutoHide: cfg.overlayAutoHide,
     overlayClickThrough: cfg.overlayClickThrough,
@@ -1169,6 +1178,7 @@ function fillSettingsFormFromApplied(applied: AppliedSettings) {
     preciseTempEnabled: applied.preciseTempEnabled,
     lhmBaseUrl: applied.lhmBaseUrl,
     overlayEnabled: applied.overlayEnabled,
+    codexEnabled: applied.codexEnabled,
     autostartEnabled: applied.autostartEnabled,
     overlayAutoHide: applied.overlayAutoHide,
     overlayClickThrough: applied.overlayClickThrough,
@@ -1308,6 +1318,7 @@ function bindSettingsUi() {
           preciseTempEnabled: readPreciseTempEnabled(),
           lhmBaseUrl: readLhmBaseUrl(),
           overlayEnabled: readOverlayEnabled(),
+          codexEnabled: document.querySelector<HTMLInputElement>('#setting-codex')?.checked ?? true,
           autostartEnabled: readAutostartEnabled(),
           overlayAutoHide: readOverlayAutoHide(),
           overlayClickThrough: readOverlayClickThrough(),
@@ -1425,6 +1436,7 @@ async function showAppVersion() {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
+  initializeCodex();
   void showAppVersion();
   bindSettingsUi();
   void bootstrapHistoryHint();

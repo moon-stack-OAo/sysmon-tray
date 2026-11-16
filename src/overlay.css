@@ -483,6 +483,8 @@ body {
   flex: 1;
   min-height: 0;
   justify-content: space-between;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .meter-row {

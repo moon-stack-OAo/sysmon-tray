@@ -1,0 +1,121 @@
+.quota-card {
+  flex-shrink: 0;
+}
+.quota-card .metric-top {
+  gap: 8px;
+}
+.quota-card .metric-label {
+  color: var(--success);
+}
+.quota-card [data-codex-status] {
+  min-width: 0;
+  flex: 1;
+  font-size: 10px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+.quota-windows {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 9px;
+}
+.quota-window {
+  min-width: 0;
+}
+.quota-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.quota-value {
+  color: var(--success);
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+.quota-track {
+  height: 4px;
+  background: var(--track, rgba(255, 255, 255, 0.06));
+  border-radius: 8px;
+  overflow: hidden;
+  margin-top: 5px;
+}
+.quota-fill {
+  height: 100%;
+  background: var(--success);
+  border-radius: inherit;
+  transition: width 200ms ease;
+}
+.quota-reset {
+  font-size: 9px;
+  line-height: 1.6;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.quota-stale {
+  opacity: 0.6;
+}
+.quota-stale .quota-fill {
+  background: var(--muted);
+}
+.quota-low .quota-value {
+  color: var(--warn);
+}
+.quota-low .quota-fill {
+  background: var(--warn);
+}
+.quota-critical .quota-value {
+  color: var(--danger);
+}
+.quota-critical .quota-fill {
+  background: var(--danger);
+}
+.quota-empty {
+  font-size: 11px;
+  color: var(--muted);
+  grid-column: 1 / -1;
+}
+.quota-note {
+  color: var(--meta);
+  font-size: 9px;
+  line-height: 1.5;
+  margin-top: 8px;
+}
+.overlay .quota-card {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  margin-top: 5px;
+}
+.overlay .quota-card .metric-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.quota-refresh {
+  border: 1px solid var(--border-strong);
+  color: var(--muted);
+  border-radius: 5px;
+  background: var(--surface-2);
+  padding: 2px 6px;
+  font-size: 10px;
+  cursor: pointer;
+}
+.quota-refresh:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+.quota-refresh:focus-visible {
+  outline: 2px solid var(--accent);
+}
+.numeric-strip [data-codex-short] {
+  font-size: 9px;
+  color: var(--meta);
+  margin-right: 2px;
+}

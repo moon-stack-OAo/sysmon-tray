@@ -1,4 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
+import { initializeCodex } from './codex';
+import './codex.css';
 import { listen } from '@tauri-apps/api/event';
 import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window';
 
@@ -74,7 +76,15 @@ let ignoreApplyPromise: Promise<void> | null = null;
 let clickThroughPollTimer: number | undefined;
 let clickThroughLeaveTimer: number | undefined;
 let pointerDown = false;
-const DEFAULT_OVERLAY_METRICS = ['cpu', 'mem', 'temp', 'gpu', 'net'];
+const DEFAULT_OVERLAY_METRICS = [
+  'cpu',
+  'mem',
+  'temp',
+  'gpu',
+  'net',
+  'codex_primary',
+  'codex_secondary',
+];
 let overlayMetrics = new Set(DEFAULT_OVERLAY_METRICS);
 
 const HIDE_DELAY_MS = 900;
@@ -328,7 +338,10 @@ function fanKindShort(kind: string): string {
   }
 }
 
-function formatFansExpanded(fans: FanMetrics[], tempSource: string): {
+function formatFansExpanded(
+  fans: FanMetrics[],
+  tempSource: string,
+): {
   primary: string;
   detail: string;
 } {
@@ -437,9 +450,7 @@ async function revealFromPeek() {
 }
 
 function applyOverlayMetrics(ids: string[] | undefined) {
-  const next = new Set(
-    (ids ?? []).filter((id) => DEFAULT_OVERLAY_METRICS.includes(id)),
-  );
+  const next = new Set((ids ?? []).filter((id) => DEFAULT_OVERLAY_METRICS.includes(id)));
   overlayMetrics = next.size ? next : new Set(DEFAULT_OVERLAY_METRICS);
 
   const hideMetric = (el: Element, metric: string) => {
@@ -459,14 +470,18 @@ function applyOverlayMetrics(ids: string[] | undefined) {
   const syncSeps = (container: Element | null, sepSelector: string) => {
     if (!container) return;
     const children = Array.from(container.children);
+    let seenMetric = false;
+    let pendingSeparator: HTMLElement | null = null;
     for (const child of children) {
-      if (!child.matches(sepSelector) || !(child instanceof HTMLElement)) continue;
-      const prev = child.previousElementSibling;
-      const nextEl = child.nextElementSibling;
-      const prevVisible = prev instanceof HTMLElement && !prev.hidden && !prev.matches(sepSelector);
-      const nextVisible =
-        nextEl instanceof HTMLElement && !nextEl.hidden && !nextEl.matches(sepSelector);
-      child.hidden = !(prevVisible && nextVisible);
+      if (!(child instanceof HTMLElement)) continue;
+      if (child.matches(sepSelector)) {
+        child.hidden = true;
+        pendingSeparator = child;
+      } else if (child.hasAttribute('data-metric') && !child.hidden) {
+        if (seenMetric && pendingSeparator) pendingSeparator.hidden = false;
+        seenMetric = true;
+        pendingSeparator = null;
+      }
     }
   };
 
@@ -537,10 +552,7 @@ function updateExpandedPanel(metrics: Metrics) {
       swapCard.hidden = false;
       const swapPercent = (metrics.swapUsedBytes / metrics.swapTotalBytes) * 100;
       setText('ov-swap', `${swapPercent.toFixed(0)}%`);
-      setFill(
-        document.querySelector('#ov-swap-bar') as HTMLElement | null,
-        swapPercent,
-      );
+      setFill(document.querySelector('#ov-swap-bar') as HTMLElement | null, swapPercent);
     }
   }
 
@@ -810,6 +822,7 @@ window.addEventListener('contextmenu', (event) => {
 });
 
 window.addEventListener('DOMContentLoaded', () => {
+  initializeCodex();
   bindCollapseUi();
   applyStyleClass('capsule');
   applyModeClass('collapsed');

@@ -1,5 +1,6 @@
 mod alert;
 mod config;
+mod codex;
 mod history;
 mod monitor;
 mod temperature;
@@ -45,6 +46,7 @@ pub struct SharedMainPosSave(pub Mutex<Option<Instant>>);
 pub struct SharedMainLastMove(pub Mutex<Option<Instant>>);
 pub struct SharedMainPosDebounce(pub AtomicBool);
 pub struct SharedTrayAlert(pub Mutex<bool>);
+pub type SharedCodex = Arc<codex::CodexMonitor>;
 
 const OVERLAY_SNAP_THRESHOLD_PX: i32 = 36;
 const OVERLAY_SNAP_CORNER_BONUS_PX: i32 = 12;
@@ -58,8 +60,7 @@ const OVERLAY_VERTICAL_HEIGHT: u32 = 200;
 const OVERLAY_NUMERIC_WIDTH: u32 = 246;
 const OVERLAY_NUMERIC_HEIGHT: u32 = 34;
 const OVERLAY_EXPANDED_WIDTH: u32 = 310;
-// 含 Swap 行与 GPU/风扇 detail：边距 8+标题 22+间距，7 行仪表与网络行约 360
-const OVERLAY_EXPANDED_HEIGHT: u32 = 360;
+const OVERLAY_EXPANDED_HEIGHT: u32 = 500;
 const OVERLAY_PEEK_THICKNESS: u32 = 8;
 const OVERLAY_PEEK_LENGTH: u32 = 96;
 
@@ -81,6 +82,25 @@ struct TempSourceStatus {
     message: String,
     precise_temp_enabled: bool,
     lhm_base_url: String,
+}
+
+#[tauri::command]
+fn get_codex_quota(monitor: tauri::State<'_, SharedCodex>, config: tauri::State<'_, SharedConfig>) -> codex::QuotaSnapshot {
+    let mut snapshot = monitor.snapshot();
+    if let Ok(cfg) = config.lock() {
+        snapshot.enabled = cfg.codex_enabled;
+        if !cfg.codex_enabled { snapshot.stale = true; }
+    }
+    snapshot
+}
+
+#[tauri::command]
+fn refresh_codex_quota(monitor: tauri::State<'_, SharedCodex>) {
+    monitor.refresh();
+}
+
+pub fn probe_codex_quota() -> Result<String, String> {
+    serde_json::to_string_pretty(&codex::probe()?).map_err(|_| "无法格式化额度数据。".to_string())
 }
 
 fn ensure_notification_permission(app: &tauri::AppHandle) -> bool {
@@ -179,7 +199,7 @@ fn get_metrics(
         )
     };
 
-    let (alert, newly_fired) = {
+    let (mut alert, newly_fired) = {
         let mut engine = alerts.lock().map_err(|e| e.to_string())?;
         engine.evaluate(&metrics, Duration::from_secs(sustain_secs))
     };
@@ -191,6 +211,11 @@ fn get_metrics(
         engine.mark_fired(&kinds);
     }
 
+    let codex_messages = codex::low_messages(&app.state::<SharedCodex>().snapshot());
+    if !codex_messages.is_empty() {
+        alert.active = true;
+        alert.messages.extend(codex_messages);
+    }
     if let Some(tray) = app.tray_by_id("main") {
         let _ = tray.set_tooltip(Some(alert.tooltip_text()));
         sync_tray_alert_icon(&app, &tray, alert.active);
@@ -471,6 +496,7 @@ struct SettingsInput {
     precise_temp_enabled: bool,
     lhm_base_url: String,
     overlay_enabled: bool,
+    codex_enabled: bool,
     autostart_enabled: bool,
     overlay_auto_hide: bool,
     overlay_click_through: bool,
@@ -496,6 +522,7 @@ impl SettingsInput {
             precise_temp_enabled: false,
             lhm_base_url: DEFAULT_LHM_BASE_URL.to_string(),
             overlay_enabled: false,
+            codex_enabled: cfg.codex_enabled,
             autostart_enabled: false,
             overlay_auto_hide: false,
             overlay_click_through: false,
@@ -522,6 +549,7 @@ struct SettingsResponse {
     precise_temp_enabled: bool,
     lhm_base_url: String,
     overlay_enabled: bool,
+    codex_enabled: bool,
     autostart_enabled: bool,
     overlay_auto_hide: bool,
     overlay_click_through: bool,
@@ -582,6 +610,7 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
         next.precise_temp_enabled = input.precise_temp_enabled;
         next.lhm_base_url = normalized_lhm.clone();
         next.overlay_enabled = input.overlay_enabled;
+        next.codex_enabled = input.codex_enabled;
         next.autostart_enabled = input.autostart_enabled;
         next.overlay_auto_hide = input.overlay_auto_hide;
         next.overlay_click_through = input.overlay_click_through;
@@ -629,6 +658,8 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
     let _ = app.emit("overlay-click-through-changed", input.overlay_click_through);
     let _ = app.emit("overlay-style-changed", parsed_style.as_str());
     let _ = app.emit("overlay-metrics-changed", overlay_metrics.clone());
+    app.state::<SharedCodex>().refresh();
+    let _ = app.emit("codex-settings-changed", input.codex_enabled);
     if input.overlay_enabled {
         if let Err(err) = apply_overlay_layout(OverlayLayoutMode::Collapsed, app) {
             eprintln!("按指标重算叠加层尺寸失败: {err}");
@@ -655,6 +686,7 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
         precise_temp_enabled: input.precise_temp_enabled,
         lhm_base_url: normalized_lhm,
         overlay_enabled: input.overlay_enabled,
+        codex_enabled: input.codex_enabled,
         autostart_enabled: input.autostart_enabled,
         overlay_auto_hide: input.overlay_auto_hide,
         overlay_click_through: input.overlay_click_through,
@@ -784,27 +816,24 @@ fn parse_overlay_layout_mode(mode: &str) -> Result<OverlayLayoutMode, String> {
 fn overlay_metric_count(metrics: &[String]) -> u32 {
     let count = metrics
         .iter()
-        .filter(|id| matches!(id.as_str(), "cpu" | "mem" | "temp" | "gpu" | "net"))
+        .filter(|id| matches!(id.as_str(), "cpu" | "mem" | "temp" | "gpu" | "net" | "codex_primary" | "codex_secondary"))
         .count() as u32;
-    count.clamp(1, 5)
+    count.clamp(1, 7)
 }
 
-fn collapsed_overlay_size(style: OverlayStyle, metric_count: u32) -> (u32, u32) {
-    let count = metric_count.clamp(1, 5);
-    let hidden = 5 - count;
+fn collapsed_overlay_size(style: OverlayStyle, metrics: &[String]) -> (u32, u32) {
+    let count = overlay_metric_count(metrics);
+    let codex_count = metrics.iter().filter(|id| id.starts_with("codex_")).count().min(count as usize) as u32;
     match style {
-        // 五项满宽 378：每项约 62，分隔与展开按钮保留
         OverlayStyle::Capsule => (
-            OVERLAY_COLLAPSED_WIDTH - hidden * 62,
+            OVERLAY_COLLAPSED_WIDTH - 5 * 62 + (count - codex_count) * 62 + codex_count * 90,
             OVERLAY_COLLAPSED_HEIGHT,
         ),
-        // 五项满高 200：每行约 32
         OverlayStyle::Vertical => (
             OVERLAY_VERTICAL_WIDTH,
-            OVERLAY_VERTICAL_HEIGHT - hidden * 32,
+            OVERLAY_VERTICAL_HEIGHT - 5 * 32 + count * 32,
         ),
-        // 五项满宽 246：每项约 36
-        OverlayStyle::Numeric => (OVERLAY_NUMERIC_WIDTH - hidden * 36, OVERLAY_NUMERIC_HEIGHT),
+        OverlayStyle::Numeric => (OVERLAY_NUMERIC_WIDTH - 5 * 36 + (count - codex_count) * 36 + codex_count * 70, OVERLAY_NUMERIC_HEIGHT),
     }
 }
 
@@ -816,7 +845,7 @@ fn overlay_layout_size(
     metrics: &[String],
 ) -> (u32, u32) {
     match mode {
-        OverlayLayoutMode::Collapsed => collapsed_overlay_size(style, overlay_metric_count(metrics)),
+        OverlayLayoutMode::Collapsed => collapsed_overlay_size(style, metrics),
         OverlayLayoutMode::Expanded => (OVERLAY_EXPANDED_WIDTH, OVERLAY_EXPANDED_HEIGHT),
         OverlayLayoutMode::Peek => {
             // 自动隐藏热区仅服务左右贴边，固定为竖细条
@@ -1709,6 +1738,7 @@ fn open_alert_settings(app: &tauri::AppHandle) {
 pub fn run() {
     let initial_config = AppConfig::load_or_default();
     let initial_alerts = AlertEngine::with_thresholds(initial_config.alert.clone());
+    let (codex_monitor, codex_receiver) = codex::CodexMonitor::new();
     let history_capacity = history_capacity_for_minutes(initial_config.history_range_minutes)
         .unwrap_or(history::DEFAULT_HISTORY_CAPACITY);
 
@@ -1751,8 +1781,11 @@ pub fn run() {
         .manage(lhm_runtime as SharedLhmRuntime)
         .manage(temp_tracker as SharedTempTracker)
         .manage(lhm_extras)
+        .manage(codex_monitor)
         .invoke_handler(tauri::generate_handler![
             get_metrics,
+            get_codex_quota,
+            refresh_codex_quota,
             get_metrics_history,
             export_metrics_csv,
             get_process_top,
@@ -1778,6 +1811,8 @@ pub fn run() {
             apply_settings_reset
         ])
         .setup(|app| {
+            let codex_monitor = Arc::clone(&app.state::<SharedCodex>());
+            codex::start_worker(app.handle().clone(), codex_monitor, codex_receiver);
             sync_autostart_with_config(app.handle());
             if let Ok(cfg) = app.state::<SharedConfig>().lock() {
                 sync_hotkeys(app.handle(), &cfg);
@@ -1923,6 +1958,7 @@ pub fn run() {
                 if code.is_none() {
                     api.prevent_exit();
                 } else {
+                    app_handle.state::<SharedCodex>().shutdown();
                     if let Some(window) = app_handle.get_webview_window("main") {
                         if let Ok(pos) = window.outer_position() {
                             persist_main_position(app_handle, pos.x, pos.y);
@@ -1942,4 +1978,26 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod overlay_layout_tests {
+    use super::*;
+
+    #[test]
+    fn codex_only_layout_fits_both_quota_items() {
+        let metrics = vec!["codex_primary".to_string(), "codex_secondary".to_string()];
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (248, 38));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Numeric, &metrics), (206, 34));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Vertical, &metrics), (76, 104));
+    }
+
+    #[test]
+    fn hardware_only_keeps_existing_dimensions_and_mixed_layout_grows() {
+        let mut metrics = vec!["cpu", "mem", "temp", "gpu", "net"].into_iter().map(String::from).collect::<Vec<_>>();
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (378, 38));
+        metrics.extend(["codex_primary".to_string(), "codex_secondary".to_string()]);
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (558, 38));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Vertical, &metrics), (76, 264));
+    }
 }

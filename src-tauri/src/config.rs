@@ -29,6 +29,10 @@ fn default_overlay_enabled() -> bool {
     false
 }
 
+fn default_codex_enabled() -> bool {
+    true
+}
+
 fn default_autostart_enabled() -> bool {
     false
 }
@@ -84,10 +88,12 @@ fn default_overlay_metrics() -> Vec<String> {
         "temp".to_string(),
         "gpu".to_string(),
         "net".to_string(),
+        "codex_primary".to_string(),
+        "codex_secondary".to_string(),
     ]
 }
 
-const OVERLAY_METRIC_IDS: &[&str] = &["cpu", "mem", "temp", "gpu", "net"];
+const OVERLAY_METRIC_IDS: &[&str] = &["cpu", "mem", "temp", "gpu", "net", "codex_primary", "codex_secondary"];
 
 pub fn normalize_overlay_metrics(raw: &[String]) -> Vec<String> {
     let mut seen = Vec::new();
@@ -224,6 +230,8 @@ pub struct AppConfig {
     /// 是否启用独立叠加层浮窗
     #[serde(default = "default_overlay_enabled")]
     pub overlay_enabled: bool,
+    #[serde(default = "default_codex_enabled")]
+    pub codex_enabled: bool,
     /// 是否开机自启
     #[serde(default = "default_autostart_enabled")]
     pub autostart_enabled: bool,
@@ -292,6 +300,7 @@ impl Default for AppConfig {
             precise_temp_enabled: default_precise_temp_enabled(),
             lhm_base_url: default_lhm_base_url(),
             overlay_enabled: default_overlay_enabled(),
+            codex_enabled: default_codex_enabled(),
             autostart_enabled: default_autostart_enabled(),
             overlay_auto_hide: default_overlay_auto_hide(),
             overlay_click_through: default_overlay_click_through(),
@@ -603,6 +612,22 @@ mod tests {
         let cfg = AppConfig::load_from_path(&path).unwrap();
         assert_eq!(cfg.alert, AlertThresholds::default());
         assert!(!cfg.notification_enabled);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn codex_only_metrics_are_preserved_and_old_configs_remain_compatible() {
+        let metrics = vec!["codex_primary".to_string(), "codex_secondary".to_string()];
+        assert_eq!(normalize_overlay_metrics(&metrics), metrics);
+        let dir = test_dir("codex-migration");
+        let path = dir.join("config.json");
+        let mut raw = serde_json::to_value(AppConfig::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("codexEnabled");
+        raw["overlayMetrics"] = serde_json::json!(["cpu", "mem"]);
+        fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let cfg = AppConfig::load_from_path(&path).unwrap();
+        assert!(cfg.codex_enabled);
+        assert_eq!(cfg.overlay_metrics, vec!["cpu", "mem"]);
         fs::remove_dir_all(&dir).ok();
     }
 

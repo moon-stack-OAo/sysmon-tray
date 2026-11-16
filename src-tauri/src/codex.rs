@@ -1,0 +1,573 @@
+use crate::config::{AppConfig, SharedConfig};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tauri::Manager;
+use tauri_plugin_notification::NotificationExt;
+
+const REFRESH_SECS: u64 = 120;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaWindow {
+    pub id: String,
+    pub label: String,
+    pub window_duration_mins: Option<u64>,
+    pub remaining_percent: Option<f64>,
+    pub resets_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaBucket {
+    pub id: String,
+    pub name: String,
+    pub plan: Option<String>,
+    pub windows: Vec<QuotaWindow>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaSnapshot {
+    pub enabled: bool,
+    pub refreshing: bool,
+    pub stale: bool,
+    pub observed_at_ms: Option<u64>,
+    pub next_refresh_at_ms: Option<u64>,
+    pub error: Option<String>,
+    pub buckets: Vec<QuotaBucket>,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+pub fn normalize_quota(result: &Value) -> Result<Vec<QuotaBucket>, String> {
+    let mut entries: Vec<(String, &Value)> = result["rateLimitsByLimitId"]
+        .as_object()
+        .map(|map| {
+            map.iter()
+                .filter(|(_, value)| value.is_object())
+                .map(|(id, value)| (id.clone(), value))
+                .collect()
+        })
+        .unwrap_or_default();
+    if entries.is_empty() && result["rateLimits"].is_object() {
+        let bucket = &result["rateLimits"];
+        entries.push((
+            bucket["limitId"].as_str().unwrap_or("codex").to_string(),
+            bucket,
+        ));
+    }
+    let buckets: Vec<_> = entries
+        .into_iter()
+        .map(|(id, value)| {
+            let windows = ["primary", "secondary"]
+                .into_iter()
+                .filter_map(|position| {
+                    let window = &value[position];
+                    if !window.is_object() {
+                        return None;
+                    }
+                    let minutes = window["windowDurationMins"].as_u64().filter(|v| *v > 0);
+                    let label = match minutes {
+                        Some(300) => "5 小时额度".to_string(),
+                        Some(10080) => "每周额度".to_string(),
+                        Some(v) if v % 60 == 0 => format!("{} 小时额度", v / 60),
+                        Some(v) => format!("{v} 分钟额度"),
+                        None => if position == "primary" {
+                            "主要额度"
+                        } else {
+                            "次要额度"
+                        }
+                        .to_string(),
+                    };
+                    Some(QuotaWindow {
+                        id: position.to_string(),
+                        label,
+                        window_duration_mins: minutes,
+                        remaining_percent: window["usedPercent"]
+                            .as_f64()
+                            .filter(|v| v.is_finite() && *v >= 0.0)
+                            .map(|v| ((100.0 - v).clamp(0.0, 100.0) * 10.0).round() / 10.0),
+                        resets_at: window["resetsAt"]
+                            .as_u64()
+                            .filter(|v| *v > 0 && *v < 253402300800),
+                    })
+                })
+                .collect();
+            QuotaBucket {
+                name: value["limitName"]
+                    .as_str()
+                    .unwrap_or(if id == "codex" { "Codex" } else { &id })
+                    .to_string(),
+                id,
+                plan: value["planType"].as_str().map(String::from),
+                windows,
+            }
+        })
+        .collect();
+    if !buckets
+        .iter()
+        .any(|b| b.windows.iter().any(|w| w.remaining_percent.is_some()))
+    {
+        return Err("未返回可用额度，请确认 Codex 已使用 ChatGPT 账户登录。".to_string());
+    }
+    Ok(buckets)
+}
+
+fn codex_executable() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("MONITOR_CODEX_PATH") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err("MONITOR_CODEX_PATH 指向的 Codex 程序不存在。".to_string());
+    }
+    if let Some(base) = dirs::data_local_dir() {
+        let bin = base.join("OpenAI/Codex/bin");
+        let mut candidates: Vec<_> = std::fs::read_dir(bin)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path().join("codex.exe"))
+            .filter(|path| path.is_file())
+            .collect();
+        candidates.sort_by_key(|path| {
+            std::cmp::Reverse(
+                path.metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(UNIX_EPOCH),
+            )
+        });
+        if let Some(path) = candidates.into_iter().next() {
+            return Ok(path);
+        }
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&paths) {
+            let path = directory.join(if cfg!(windows) { "codex.exe" } else { "codex" });
+            if path.is_file() {
+                return Ok(path);
+            }
+        }
+    }
+    Err("未找到 Codex，请安装并登录 Codex，或设置 MONITOR_CODEX_PATH。".to_string())
+}
+
+struct CodexProcess {
+    child: Child,
+    messages: mpsc::Receiver<Value>,
+    reader: Option<std::thread::JoinHandle<()>>,
+    next_id: u64,
+}
+
+impl CodexProcess {
+    fn start(stop: &AtomicBool) -> Result<Self, String> {
+        let mut command = Command::new(codex_executable()?);
+        command
+            .args(["app-server", "--listen", "stdio://"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        let mut child = command
+            .spawn()
+            .map_err(|_| "无法启动 Codex 查询进程，请检查安装与运行权限。".to_string())?;
+        let stdout = child.stdout.take().ok_or("无法读取 Codex 输出。")?;
+        let (sender, messages) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else {
+                    break;
+                };
+                if let Ok(message) = serde_json::from_str(&line) {
+                    if sender.send(message).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        let mut process = Self {
+            child,
+            messages,
+            reader: Some(reader),
+            next_id: 1,
+        };
+        process.request("initialize", Some(json!({"clientInfo":{"name":"sysmon_codex_quota","title":"SysMon","version":env!("CARGO_PKG_VERSION")},"capabilities":{}})), stop)?;
+        process.write(&json!({"method":"initialized"}))?;
+        Ok(process)
+    }
+
+    fn write(&mut self, message: &Value) -> Result<(), String> {
+        let input = self.child.stdin.as_mut().ok_or("Codex 查询连接已关闭。")?;
+        writeln!(input, "{message}")
+            .and_then(|_| input.flush())
+            .map_err(|_| "Codex 查询连接已关闭。".to_string())
+    }
+
+    fn request(
+        &mut self,
+        method: &str,
+        params: Option<Value>,
+        stop: &AtomicBool,
+    ) -> Result<Value, String> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut message = json!({"id":id,"method":method});
+        if let Some(params) = params {
+            message["params"] = params;
+        }
+        self.write(&message)?;
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        while Instant::now() < deadline {
+            if stop.load(Ordering::Relaxed) {
+                return Err("额度监测已停止。".to_string());
+            }
+            match self.messages.recv_timeout(Duration::from_millis(200)) {
+                Ok(message) if message["id"].as_u64() == Some(id) => {
+                    if message.get("error").is_some() {
+                        return Err("额度查询失败，请检查网络并确认 Codex 已登录 ChatGPT 账户。"
+                            .to_string());
+                    }
+                    return message
+                        .get("result")
+                        .cloned()
+                        .ok_or_else(|| "Codex 返回了无效的额度响应。".to_string());
+                }
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(_) => return Err("Codex 查询进程已退出，请检查登录状态后刷新。".to_string()),
+            }
+        }
+        Err("额度查询超时，稍后会自动重试。".to_string())
+    }
+}
+
+impl Drop for CodexProcess {
+    fn drop(&mut self) {
+        self.child.stdin.take();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+pub fn probe() -> Result<Vec<QuotaBucket>, String> {
+    let stop = AtomicBool::new(false);
+    let mut process = CodexProcess::start(&stop)?;
+    normalize_quota(&process.request("account/rateLimits/read", None, &stop)?)
+}
+
+pub struct CodexMonitor {
+    state: Mutex<QuotaSnapshot>,
+    wake: mpsc::Sender<()>,
+    stop: AtomicBool,
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl CodexMonitor {
+    pub fn new() -> (Arc<Self>, mpsc::Receiver<()>) {
+        let (wake, receiver) = mpsc::channel();
+        (
+            Arc::new(Self {
+                state: Mutex::new(QuotaSnapshot::default()),
+                wake,
+                stop: AtomicBool::new(false),
+                worker: Mutex::new(None),
+            }),
+            receiver,
+        )
+    }
+    pub fn snapshot(&self) -> QuotaSnapshot {
+        let mut state = self.state.lock().map(|s| s.clone()).unwrap_or_default();
+        state.stale = !state.enabled
+            || state.error.is_some()
+            || state
+                .observed_at_ms
+                .is_none_or(|at| now_ms().saturating_sub(at) > 360_000);
+        state
+    }
+    pub fn refresh(&self) {
+        let _ = self.wake.send(());
+    }
+    pub fn shutdown(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.refresh();
+        let worker = self.worker.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(worker) = worker {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct AlertMemory {
+    sent: HashMap<String, u8>,
+}
+
+fn pending_alerts(
+    snapshot: &QuotaSnapshot,
+    memory: &AlertMemory,
+    now_secs: u64,
+) -> Vec<(String, u8, String)> {
+    if !snapshot.enabled || snapshot.stale {
+        return Vec::new();
+    }
+    snapshot
+        .buckets
+        .iter()
+        .flat_map(|bucket| {
+            bucket.windows.iter().filter_map(|window| {
+                let remaining = window.remaining_percent?;
+                let reset = window.resets_at?;
+                if reset <= now_secs || remaining > 20.0 {
+                    return None;
+                }
+                let level = if remaining <= 10.0 { 10 } else { 20 };
+                let key = format!("{}/{}/{reset}", bucket.id, window.id);
+                if memory
+                    .sent
+                    .get(&key)
+                    .is_some_and(|previous| *previous <= level)
+                {
+                    return None;
+                }
+                Some((
+                    key,
+                    level,
+                    format!("{} · {}剩余 {remaining:.0}%", bucket.name, window.label),
+                ))
+            })
+        })
+        .collect()
+}
+
+pub fn low_messages(snapshot: &QuotaSnapshot) -> Vec<String> {
+    pending_alerts(snapshot, &AlertMemory::default(), now_ms() / 1000)
+        .into_iter()
+        .map(|(_, _, message)| message)
+        .collect()
+}
+
+fn alert_path() -> Option<PathBuf> {
+    AppConfig::config_path()
+        .ok()
+        .and_then(|path| path.parent().map(|p| p.join("codex-alerts.json")))
+}
+
+fn notify(app: &tauri::AppHandle, monitor: &CodexMonitor, memory: &mut AlertMemory) {
+    let permitted = app
+        .state::<SharedConfig>()
+        .lock()
+        .map(|cfg| {
+            cfg.notification_enabled && cfg.codex_enabled && !crate::quiet_hours_active(&cfg)
+        })
+        .unwrap_or(false);
+    if !permitted {
+        return;
+    }
+    let pending = pending_alerts(&monitor.snapshot(), memory, now_ms() / 1000);
+    if pending.is_empty() {
+        return;
+    }
+    if !matches!(
+        app.notification().permission_state(),
+        Ok(tauri::plugin::PermissionState::Granted)
+    ) {
+        return;
+    }
+    let body = pending
+        .iter()
+        .map(|(_, _, message)| message.as_str())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if app
+        .notification()
+        .builder()
+        .title("Codex 额度提醒")
+        .body(body)
+        .show()
+        .is_ok()
+    {
+        for (key, level, _) in pending {
+            memory.sent.insert(key, level);
+        }
+        memory.sent.retain(|key, _| {
+            key.rsplit('/')
+                .next()
+                .and_then(|v| v.parse::<u64>().ok())
+                .is_some_and(|reset| reset > now_ms() / 1000)
+        });
+        if let Some(path) = alert_path() {
+            if let Ok(raw) = serde_json::to_vec(memory) {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let temporary = path.with_extension("json.tmp");
+                if std::fs::write(&temporary, raw).is_ok() {
+                    let _ = std::fs::rename(temporary, path);
+                }
+            }
+        }
+    }
+}
+
+pub fn start_worker(
+    app: tauri::AppHandle,
+    monitor: Arc<CodexMonitor>,
+    receiver: mpsc::Receiver<()>,
+) {
+    let owner = Arc::clone(&monitor);
+    let worker = std::thread::spawn(move || {
+        let mut process: Option<CodexProcess> = None;
+        let mut due = Instant::now();
+        let mut failures: u32 = 0;
+        let mut was_enabled = false;
+        let mut memory = alert_path()
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|raw| serde_json::from_slice(&raw).ok())
+            .unwrap_or_default();
+        while !monitor.stop.load(Ordering::Relaxed) {
+            let enabled = app
+                .state::<SharedConfig>()
+                .lock()
+                .map(|cfg| cfg.codex_enabled)
+                .unwrap_or(false);
+            if let Ok(mut state) = monitor.state.lock() {
+                state.enabled = enabled;
+            }
+            if !enabled {
+                process = None;
+                if let Ok(mut state) = monitor.state.lock() {
+                    state.refreshing = false;
+                    state.next_refresh_at_ms = None;
+                }
+            } else if !was_enabled || Instant::now() >= due {
+                if let Ok(mut state) = monitor.state.lock() {
+                    state.refreshing = true;
+                }
+                let result = (|| {
+                    if process.is_none() {
+                        process = Some(CodexProcess::start(&monitor.stop)?);
+                    }
+                    normalize_quota(&process.as_mut().unwrap().request(
+                        "account/rateLimits/read",
+                        None,
+                        &monitor.stop,
+                    )?)
+                })();
+                let delay = match result {
+                    Ok(buckets) => {
+                        failures = 0;
+                        if let Ok(mut state) = monitor.state.lock() {
+                            state.buckets = buckets;
+                            state.observed_at_ms = Some(now_ms());
+                            state.error = None;
+                        }
+                        REFRESH_SECS
+                    }
+                    Err(error) => {
+                        process = None;
+                        failures = failures.saturating_add(1);
+                        if let Ok(mut state) = monitor.state.lock() {
+                            state.error = Some(error);
+                        }
+                        (REFRESH_SECS * 2_u64.pow(failures.min(3))).min(900)
+                    }
+                };
+                due = Instant::now() + Duration::from_secs(delay);
+                if let Ok(mut state) = monitor.state.lock() {
+                    state.refreshing = false;
+                    state.next_refresh_at_ms = Some(now_ms() + delay * 1000);
+                }
+            }
+            was_enabled = enabled;
+            notify(&app, &monitor, &mut memory);
+            if receiver.recv_timeout(Duration::from_secs(1)).is_ok() {
+                while receiver.try_recv().is_ok() {}
+                let recently_updated = monitor
+                    .snapshot()
+                    .observed_at_ms
+                    .is_some_and(|at| now_ms().saturating_sub(at) < 10_000);
+                if !recently_updated {
+                    due = Instant::now();
+                }
+            }
+        }
+    });
+    if let Ok(mut slot) = owner.worker.lock() {
+        *slot = Some(worker);
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn normalizes_all_buckets_without_leaking_account_fields() {
+        let value = json!({"accountId":"private-account","rateLimits":{"primary":{"usedPercent":99}},"rateLimitsByLimitId":{"codex":{"planType":"plus","primary":{"usedPercent":23,"windowDurationMins":300,"resetsAt":1800000000},"secondary":{"usedPercent":4,"windowDurationMins":10080}},"extra":{"primary":{"usedPercent":105}}}});
+        let buckets = normalize_quota(&value).unwrap();
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].windows[0].remaining_percent, Some(77.0));
+        assert_eq!(buckets[0].windows[1].remaining_percent, Some(96.0));
+        assert_eq!(buckets[1].windows[0].remaining_percent, Some(0.0));
+        assert!(!serde_json::to_string(&buckets)
+            .unwrap()
+            .contains("private-account"));
+    }
+    #[test]
+    fn missing_fields_stay_unknown_and_windows_are_dynamic() {
+        let buckets = normalize_quota(&json!({"rateLimits":{"primary":{"usedPercent":12,"windowDurationMins":60},"secondary":{"usedPercent":null}}})).unwrap();
+        assert_eq!(buckets[0].windows[0].label, "1 小时额度");
+        assert_eq!(buckets[0].windows[0].resets_at, None);
+        assert_eq!(buckets[0].windows[1].remaining_percent, None);
+        assert!(normalize_quota(&json!({"rateLimits":{"primary":{"usedPercent":-1}}})).is_err());
+        assert!(normalize_quota(&json!({})).is_err());
+    }
+    #[test]
+    fn alerts_deduplicate_escalate_and_rearm_after_reset() {
+        let mut snapshot = QuotaSnapshot {
+            enabled: true,
+            stale: false,
+            buckets: normalize_quota(
+                &json!({"rateLimits":{"primary":{"usedPercent":81,"resetsAt":2000}}}),
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+        let mut memory = AlertMemory::default();
+        let first = pending_alerts(&snapshot, &memory, 1000);
+        assert_eq!(first.len(), 1);
+        memory.sent.insert(first[0].0.clone(), first[0].1);
+        let mut memory: AlertMemory =
+            serde_json::from_str(&serde_json::to_string(&memory).unwrap()).unwrap();
+        assert!(pending_alerts(&snapshot, &memory, 1000).is_empty());
+        snapshot.buckets[0].windows[0].remaining_percent = Some(9.0);
+        let second = pending_alerts(&snapshot, &memory, 1000);
+        assert_eq!(second[0].1, 10);
+        memory.sent.insert(second[0].0.clone(), second[0].1);
+        assert!(pending_alerts(&snapshot, &memory, 1000).is_empty());
+        snapshot.buckets[0].windows[0].resets_at = Some(3000);
+        assert_eq!(pending_alerts(&snapshot, &memory, 1000).len(), 1);
+        snapshot.stale = true;
+        assert!(pending_alerts(&snapshot, &memory, 1000).is_empty());
+        snapshot.stale = false;
+        assert!(pending_alerts(&snapshot, &memory, 4000).is_empty());
+    }
+}

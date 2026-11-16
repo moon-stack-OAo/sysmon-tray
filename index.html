@@ -10,7 +10,9 @@
   <body>
     <main class="panel">
       <header class="panel-header" data-tauri-drag-region>
-        <h1 data-tauri-drag-region>系统监测 <span id="app-version" class="app-version muted">v--</span></h1>
+        <h1 data-tauri-drag-region>
+          系统监测 <span id="app-version" class="app-version muted">v--</span>
+        </h1>
         <span id="updated-at" class="muted" data-tauri-drag-region>--</span>
       </header>
 
@@ -39,6 +41,16 @@
 
       <div id="view-monitor" class="view" role="tabpanel">
         <div id="alert-banner" class="alert-banner" hidden><span></span></div>
+
+        <section class="metric-card quota-card">
+          <div class="metric-top">
+            <span class="metric-label">Codex 剩余额度</span>
+            <span data-codex-status>正在连接…</span>
+            <button type="button" class="quota-refresh" data-codex-refresh>刷新</button>
+          </div>
+          <div class="quota-windows" data-codex-windows></div>
+          <div class="quota-note">套餐限额百分比 · 每 120 秒同步 · 不能换算为固定 token 数</div>
+        </section>
 
         <div class="hero-grid">
           <section id="cpu-card" class="metric-card primary-metric">
@@ -265,7 +277,8 @@
                   />
                 </label>
                 <p class="settings-hint muted">
-                  Ctrl+Alt+Shift+S 显示面板，Ctrl+Alt+Shift+O 叠加层，Ctrl+Alt+Shift+X 穿透；留空则禁用。若仍被占用，可改成别的组合。
+                  Ctrl+Alt+Shift+S 显示面板，Ctrl+Alt+Shift+O 叠加层，Ctrl+Alt+Shift+X
+                  穿透；留空则禁用。若仍被占用，可改成别的组合。
                 </p>
 
                 <label class="field switch-field">
@@ -275,6 +288,18 @@
                     <span class="toggle-track"></span>
                   </span>
                 </label>
+
+                <label class="field switch-field">
+                  <span class="field-label">Codex 额度监测</span>
+                  <span class="toggle">
+                    <input id="setting-codex" type="checkbox" />
+                    <span class="toggle-track"></span>
+                  </span>
+                </label>
+                <p class="settings-hint muted">
+                  使用 Codex 现有登录；每 120 秒查询。剩余 20% / 10%
+                  时提醒，遵循系统通知开关与安静时段。
+                </p>
 
                 <label class="field switch-field">
                   <span class="field-label">开机自启</span>
@@ -312,6 +337,14 @@
                 <div class="field">
                   <span class="field-label">叠加层指标</span>
                   <div class="metric-checks">
+                    <label class="check-field">
+                      <input type="checkbox" data-metric="codex_primary" checked />
+                      <span>Codex 短期额度</span>
+                    </label>
+                    <label class="check-field">
+                      <input type="checkbox" data-metric="codex_secondary" checked />
+                      <span>Codex 长期额度</span>
+                    </label>
                     <label class="check-field">
                       <input type="checkbox" data-metric="cpu" checked />
                       <span>CPU</span>
@@ -383,9 +416,8 @@
                 <div id="temp-source-status" class="settings-hint muted">状态：--</div>
                 <button type="button" class="hint-toggle">了解更多</button>
                 <p class="settings-hint collapsible muted">
-                  需本机运行 LibreHardwareMonitor 并开启 Remote Web
-                  Server；本应用不捆绑驱动。CPU 温度失败时回退 ACPI/WMI；GPU
-                  与风扇转速仅来自 LHM，无独立回退。
+                  需本机运行 LibreHardwareMonitor 并开启 Remote Web Server；本应用不捆绑驱动。CPU
+                  温度失败时回退 ACPI/WMI；GPU 与风扇转速仅来自 LHM，无独立回退。
                 </p>
               </div>
             </section>

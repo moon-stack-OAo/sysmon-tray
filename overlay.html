@@ -8,7 +8,7 @@
     <script type="module" src="/src/overlay.ts" defer></script>
   </head>
   <body>
-     <main id="overlay-root" class="overlay collapsed">
+    <main id="overlay-root" class="overlay collapsed">
       <div id="peek-bar" class="peek-bar" title="移入展开"></div>
 
       <div class="strip">
@@ -49,6 +49,16 @@
           <span id="strip-net-up" class="strip-v">--</span>
         </span>
 
+        <span class="strip-sep"></span>
+        <span class="strip-metric" data-metric="codex_primary">
+          <span class="strip-k">Codex <span data-codex-short="primary">5h</span></span>
+          <span class="strip-v" data-codex-value="primary">--</span>
+        </span>
+        <span class="strip-sep"></span>
+        <span class="strip-metric" data-metric="codex_secondary">
+          <span class="strip-k" data-codex-short="secondary">周</span>
+          <span class="strip-v" data-codex-value="secondary">--</span>
+        </span>
         <button type="button" id="btn-expand" class="icon-btn" title="展开" aria-label="展开">
           <span class="chevron down"></span>
         </button>
@@ -64,6 +74,16 @@
         <span id="num-gpu" class="num-v" data-metric="gpu" title="GPU 占用%">--</span>
         <span class="num-sep">·</span>
         <span id="num-net" class="num-v net" data-metric="net">↓-- ↑--</span>
+        <span class="num-sep">/</span>
+        <span class="num-v" data-metric="codex_primary"
+          ><span data-codex-short="primary">5h</span
+          ><span data-codex-value="primary">--</span></span
+        >
+        <span class="num-sep">/</span>
+        <span class="num-v" data-metric="codex_secondary"
+          ><span data-codex-short="secondary">周</span
+          ><span data-codex-value="secondary">--</span></span
+        >
         <button type="button" id="btn-expand-num" class="icon-btn" title="展开" aria-label="展开">
           <span class="chevron down"></span>
         </button>
@@ -91,6 +111,14 @@
           <span id="v-net" class="v-v sm">↓--</span>
           <span id="v-net-up" class="v-v sm">↑--</span>
         </div>
+        <div class="v-item" data-metric="codex_primary">
+          <span class="v-k">Codex <span data-codex-short="primary">5h</span></span>
+          <span class="v-v" data-codex-value="primary">--</span>
+        </div>
+        <div class="v-item" data-metric="codex_secondary">
+          <span class="v-k">Codex <span data-codex-short="secondary">周</span></span>
+          <span class="v-v" data-codex-value="secondary">--</span>
+        </div>
       </div>
 
       <div class="panel-view">
@@ -104,6 +132,14 @@
         </header>
 
         <section class="meter-list">
+          <section class="quota-card">
+            <div class="metric-top">
+              <span class="meter-label">Codex 剩余额度</span>
+              <button type="button" class="quota-refresh" data-codex-refresh>刷新</button>
+            </div>
+            <div class="quota-windows" data-codex-windows></div>
+            <div class="quota-note" data-codex-status>正在连接…</div>
+          </section>
           <div id="ov-cpu-card" class="meter-row">
             <div class="meter-top">
               <span class="meter-label">CPU</span>
