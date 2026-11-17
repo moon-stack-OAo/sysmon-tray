@@ -47,6 +47,7 @@ pub struct SharedMainLastMove(pub Mutex<Option<Instant>>);
 pub struct SharedMainPosDebounce(pub AtomicBool);
 pub struct SharedTrayAlert(pub Mutex<bool>);
 pub type SharedCodex = Arc<codex::CodexMonitor>;
+pub type SharedCodexSyncMenu = Mutex<Option<MenuItem<tauri::Wry>>>;
 
 const OVERLAY_SNAP_THRESHOLD_PX: i32 = 36;
 const OVERLAY_SNAP_CORNER_BONUS_PX: i32 = 12;
@@ -95,8 +96,23 @@ fn get_codex_quota(monitor: tauri::State<'_, SharedCodex>, config: tauri::State<
 }
 
 #[tauri::command]
-fn refresh_codex_quota(monitor: tauri::State<'_, SharedCodex>) {
+fn refresh_codex_quota(app: AppHandle, monitor: tauri::State<'_, SharedCodex>) -> codex::QuotaSnapshot {
     monitor.refresh();
+    publish_codex_state(&app, &monitor);
+    monitor.snapshot()
+}
+
+pub(crate) fn publish_codex_state(app: &AppHandle, monitor: &codex::CodexMonitor) {
+    let snapshot = monitor.snapshot();
+    let menu = app.state::<SharedCodexSyncMenu>().lock().ok().and_then(|slot| slot.clone());
+    if let Some(menu) = menu {
+        let (title, enabled) = snapshot.sync_menu_state();
+        let _ = app.run_on_main_thread(move || {
+            let _ = menu.set_text(title);
+            let _ = menu.set_enabled(enabled);
+        });
+    }
+    let _ = app.emit("codex-quota-updated", ());
 }
 
 pub fn probe_codex_quota() -> Result<String, String> {
@@ -658,7 +674,8 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
     let _ = app.emit("overlay-click-through-changed", input.overlay_click_through);
     let _ = app.emit("overlay-style-changed", parsed_style.as_str());
     let _ = app.emit("overlay-metrics-changed", overlay_metrics.clone());
-    app.state::<SharedCodex>().refresh();
+    app.state::<SharedCodex>().settings_changed(input.codex_enabled);
+    publish_codex_state(app, &app.state::<SharedCodex>());
     let _ = app.emit("codex-settings-changed", input.codex_enabled);
     if input.overlay_enabled {
         if let Err(err) = apply_overlay_layout(OverlayLayoutMode::Collapsed, app) {
@@ -826,14 +843,14 @@ fn collapsed_overlay_size(style: OverlayStyle, metrics: &[String]) -> (u32, u32)
     let codex_count = metrics.iter().filter(|id| id.starts_with("codex_")).count().min(count as usize) as u32;
     match style {
         OverlayStyle::Capsule => (
-            OVERLAY_COLLAPSED_WIDTH - 5 * 62 + (count - codex_count) * 62 + codex_count * 90,
+            OVERLAY_COLLAPSED_WIDTH - 5 * 62 + (count - codex_count) * 62 + codex_count * 150,
             OVERLAY_COLLAPSED_HEIGHT,
         ),
         OverlayStyle::Vertical => (
             OVERLAY_VERTICAL_WIDTH,
-            OVERLAY_VERTICAL_HEIGHT - 5 * 32 + count * 32,
+            OVERLAY_VERTICAL_HEIGHT - 5 * 32 + count * 32 + codex_count * 16,
         ),
-        OverlayStyle::Numeric => (OVERLAY_NUMERIC_WIDTH - 5 * 36 + (count - codex_count) * 36 + codex_count * 70, OVERLAY_NUMERIC_HEIGHT),
+        OverlayStyle::Numeric => (OVERLAY_NUMERIC_WIDTH - 5 * 36 + (count - codex_count) * 36 + codex_count * 118, OVERLAY_NUMERIC_HEIGHT),
     }
 }
 
@@ -1770,6 +1787,7 @@ pub fn run() {
         .manage(Mutex::new(initial_config) as SharedConfig)
         .manage(Mutex::new(false) as SharedSettingsOpen)
         .manage(Mutex::new(None) as SharedOverlayMenu)
+        .manage(Mutex::new(None) as SharedCodexSyncMenu)
         .manage(SharedOverlayPosSave(Mutex::new(None)))
         .manage(SharedOverlayLastMove(Mutex::new(None)))
         .manage(SharedOverlaySnapQuietUntil(Mutex::new(None)))
@@ -1828,6 +1846,13 @@ pub fn run() {
             let show = MenuItem::with_id(app, "show", "显示面板", true, None::<&str>)?;
             let alert_settings =
                 MenuItem::with_id(app, "alert_settings", "设置", true, None::<&str>)?;
+            let (sync_title, sync_enabled) = app.state::<SharedCodex>().snapshot().sync_menu_state();
+            let codex_sync = MenuItem::with_id(app, "codex_sync", sync_title, sync_enabled, None::<&str>)?;
+            {
+                let state = app.state::<SharedCodexSyncMenu>();
+                let mut slot = state.lock().map_err(|e| e.to_string())?;
+                *slot = Some(codex_sync.clone());
+            }
             let overlay_item = CheckMenuItem::with_id(
                 app,
                 "overlay",
@@ -1841,7 +1866,8 @@ pub fn run() {
                 let mut slot = state.lock().map_err(|e| e.to_string())?;
                 *slot = Some(overlay_item.clone());
             }
-            let menu = Menu::with_items(app, &[&show, &overlay_item, &alert_settings, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &overlay_item, &codex_sync, &alert_settings, &quit])?;
+            publish_codex_state(app.handle(), &app.state::<SharedCodex>());
 
             let tray_icon = app
                 .default_window_icon()
@@ -1858,6 +1884,11 @@ pub fn run() {
                     }
                     "show" => {
                         show_panel(app, None);
+                    }
+                    "codex_sync" => {
+                        let monitor = app.state::<SharedCodex>();
+                        monitor.refresh();
+                        publish_codex_state(app, &monitor);
                     }
                     "alert_settings" => {
                         open_alert_settings(app);
@@ -1987,9 +2018,9 @@ mod overlay_layout_tests {
     #[test]
     fn codex_only_layout_fits_both_quota_items() {
         let metrics = vec!["codex_primary".to_string(), "codex_secondary".to_string()];
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (248, 38));
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Numeric, &metrics), (206, 34));
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Vertical, &metrics), (76, 104));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (368, 38));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Numeric, &metrics), (302, 34));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Vertical, &metrics), (76, 136));
     }
 
     #[test]
@@ -1997,7 +2028,7 @@ mod overlay_layout_tests {
         let mut metrics = vec!["cpu", "mem", "temp", "gpu", "net"].into_iter().map(String::from).collect::<Vec<_>>();
         assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (378, 38));
         metrics.extend(["codex_primary".to_string(), "codex_secondary".to_string()]);
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (558, 38));
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Vertical, &metrics), (76, 264));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (678, 38));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Vertical, &metrics), (76, 296));
     }
 }

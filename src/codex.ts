@@ -21,6 +21,7 @@ interface QuotaSnapshot {
   refreshing: boolean;
   stale: boolean;
   observedAtMs: number | null;
+  nextRefreshAtMs: number | null;
   error: string | null;
   buckets: QuotaBucket[];
 }
@@ -37,6 +38,36 @@ function resetText(at: number | null): string {
 
 function percentage(window: QuotaWindow | undefined): string {
   return window?.remainingPercent == null ? '--' : `${window.remainingPercent}%`;
+}
+
+function resetAtText(at: number | null | undefined): string {
+  if (!at) return '重置时间未知';
+  const date = new Date(at * 1000);
+  if (!Number.isFinite(date.getTime())) return '重置时间未知';
+  return date.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function compactResetText(at: number | null | undefined): string {
+  if (!at || !Number.isFinite(at)) return '未知';
+  const minutes = Math.ceil((at * 1000 - Date.now()) / 60000);
+  if (minutes <= 0) return '待同步';
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const remainingMinutes = minutes % 60;
+  return [
+    days ? `${days}d` : '',
+    hours ? `${hours}h` : '',
+    remainingMinutes ? `${remainingMinutes}m` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
 }
 
 function shortLabel(window: QuotaWindow | undefined, position: string): string {
@@ -70,6 +101,19 @@ export function initializeCodex() {
         node.textContent = shortLabel(window, position);
       });
       document
+        .querySelectorAll<HTMLElement>(`[data-codex-reset-in="${position}"]`)
+        .forEach((node) => {
+          node.textContent = snapshot.enabled ? compactResetText(window?.resetsAt) : '--';
+          if (snapshot.enabled && window?.resetsAt) {
+            node.dataset.codexResetCompact = String(window.resetsAt);
+          } else {
+            delete node.dataset.codexResetCompact;
+          }
+          node.title = snapshot.enabled
+            ? `距重置剩余时间\n重置时间：${resetAtText(window?.resetsAt)}（本地时间）`
+            : 'Codex 额度监测已关闭';
+        });
+      document
         .querySelectorAll<HTMLElement>(`[data-metric="codex_${position}"]`)
         .forEach((node) => {
           const pendingReset = !!window?.resetsAt && window.resetsAt <= Date.now() / 1000;
@@ -83,7 +127,7 @@ export function initializeCodex() {
           );
           node.title = !snapshot.enabled
             ? 'Codex 额度监测已关闭'
-            : `${primaryBucket?.name ?? 'Codex'} · ${window?.label ?? '额度'}剩余 ${percentage(window)}${snapshot.stale ? '（数据过期）' : ''}\n${snapshot.error ?? resetText(window?.resetsAt ?? null)}`;
+            : `${primaryBucket?.name ?? 'Codex'} · ${window?.label ?? '额度'}剩余 ${percentage(window)}${snapshot.stale ? '（数据过期）' : ''}\n重置时间：${resetAtText(window?.resetsAt)}（本地时间）\n${resetText(window?.resetsAt ?? null)}${snapshot.error ? `\n${snapshot.error}` : ''}`;
         });
     }
     document.querySelectorAll<HTMLElement>('[data-codex-status]').forEach((node) => {
@@ -93,14 +137,28 @@ export function initializeCodex() {
             minute: '2-digit',
           })
         : '';
+      const retrySeconds =
+        snapshot.nextRefreshAtMs == null
+          ? null
+          : Math.max(0, Math.ceil((snapshot.nextRefreshAtMs - Date.now()) / 1000));
+      const retryText =
+        retrySeconds == null
+          ? '等待自动重试'
+          : retrySeconds === 0
+            ? '即将自动重试'
+            : `${retrySeconds} 秒后自动重试`;
       node.textContent = !snapshot.enabled
         ? '已关闭 · 可在设置中启用'
-        : (snapshot.error ??
-          (snapshot.refreshing
-            ? '正在同步…'
+        : snapshot.refreshing
+          ? '正在同步…'
+          : snapshot.error
+            ? `同步暂时失败 · ${retryText}`
             : snapshot.stale
               ? '等待同步 · 数据过期'
-              : `${primaryBucket?.plan?.toUpperCase() ?? 'CODEX'} · ${time} 同步`));
+              : `${primaryBucket?.plan?.toUpperCase() ?? 'CODEX'} · ${time} 同步`;
+      node.title = snapshot.error
+        ? `${snapshot.error}\n${retryText}${time ? ` · 保留 ${time} 查询的额度数据` : ''}`
+        : node.textContent;
       node.classList.toggle('quota-stale', !fresh);
     });
     document.querySelectorAll<HTMLButtonElement>('[data-codex-refresh]').forEach((button) => {
@@ -191,8 +249,7 @@ export function initializeCodex() {
     button.addEventListener('click', async () => {
       button.disabled = true;
       try {
-        await invoke('refresh_codex_quota');
-        await poll();
+        render(await invoke<QuotaSnapshot>('refresh_codex_quota'));
       } catch {
         if (current)
           render({ ...current, stale: true, refreshing: false, error: '刷新请求失败，请稍后重试' });
@@ -206,11 +263,17 @@ export function initializeCodex() {
   void listen('codex-settings-changed', () => {
     void poll();
   });
+  void listen('codex-quota-updated', () => {
+    void poll();
+  });
   void poll();
   window.setInterval(() => {
     void poll();
   }, 2000);
   window.setInterval(() => {
+    document.querySelectorAll<HTMLElement>('[data-codex-reset-compact]').forEach((node) => {
+      node.textContent = compactResetText(Number(node.dataset.codexResetCompact));
+    });
     document.querySelectorAll<HTMLElement>('[data-codex-reset]').forEach((node) => {
       node.textContent = resetText(Number(node.dataset.codexReset));
     });

@@ -45,11 +45,76 @@ pub struct QuotaSnapshot {
     pub buckets: Vec<QuotaBucket>,
 }
 
+impl QuotaSnapshot {
+    pub fn sync_menu_state(&self) -> (String, bool) {
+        if !self.enabled {
+            return ("同步 Codex 额度（监测已关闭）".to_string(), false);
+        }
+        if self.refreshing {
+            return ("正在同步 Codex 额度…".to_string(), false);
+        }
+        if self.error.is_some() {
+            return ("重试同步 Codex 额度".to_string(), true);
+        }
+        let updated = self.observed_at_ms.and_then(|at| {
+            chrono::DateTime::from_timestamp_millis(i64::try_from(at).ok()?).map(|time| {
+                time.with_timezone(&chrono::Local)
+                    .format("%H:%M")
+                    .to_string()
+            })
+        });
+        let title = updated.map_or_else(
+            || "同步 Codex 额度".to_string(),
+            |time| format!("同步 Codex 额度（上次 {time}）"),
+        );
+        (title, true)
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn retry_delay_secs(failures: u32) -> u64 {
+    match failures {
+        0 => REFRESH_SECS,
+        1 => 15,
+        2 => 30,
+        3 => 60,
+        _ => REFRESH_SECS,
+    }
+}
+
+fn query_with_reconnect<C, T>(
+    connection: &mut Option<C>,
+    stop: &AtomicBool,
+    mut connect: impl FnMut() -> Result<C, String>,
+    mut query: impl FnMut(&mut C) -> Result<T, String>,
+) -> Result<T, String> {
+    for attempt in 0..2 {
+        if stop.load(Ordering::Relaxed) {
+            return Err("额度监测已停止。".to_string());
+        }
+        let result = (|| {
+            if connection.is_none() {
+                *connection = Some(connect()?);
+            }
+            query(connection.as_mut().unwrap())
+        })();
+        match result {
+            Ok(result) => return Ok(result),
+            Err(error) => {
+                connection.take();
+                if attempt == 1 {
+                    return Err(error);
+                }
+            }
+        }
+    }
+    unreachable!()
 }
 
 pub fn normalize_quota(result: &Value) -> Result<Vec<QuotaBucket>, String> {
@@ -270,24 +335,37 @@ impl Drop for CodexProcess {
 
 pub fn probe() -> Result<Vec<QuotaBucket>, String> {
     let stop = AtomicBool::new(false);
-    let mut process = CodexProcess::start(&stop)?;
-    normalize_quota(&process.request("account/rateLimits/read", None, &stop)?)
+    read_quota(&mut None, &stop)
+}
+
+fn read_quota(
+    process: &mut Option<CodexProcess>,
+    stop: &AtomicBool,
+) -> Result<Vec<QuotaBucket>, String> {
+    query_with_reconnect(
+        process,
+        stop,
+        || CodexProcess::start(stop),
+        |process| normalize_quota(&process.request("account/rateLimits/read", None, stop)?),
+    )
 }
 
 pub struct CodexMonitor {
     state: Mutex<QuotaSnapshot>,
-    wake: mpsc::Sender<()>,
+    wake: mpsc::SyncSender<()>,
+    manual_requested: AtomicBool,
     stop: AtomicBool,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl CodexMonitor {
     pub fn new() -> (Arc<Self>, mpsc::Receiver<()>) {
-        let (wake, receiver) = mpsc::channel();
+        let (wake, receiver) = mpsc::sync_channel(1);
         (
             Arc::new(Self {
                 state: Mutex::new(QuotaSnapshot::default()),
                 wake,
+                manual_requested: AtomicBool::new(false),
                 stop: AtomicBool::new(false),
                 worker: Mutex::new(None),
             }),
@@ -303,12 +381,46 @@ impl CodexMonitor {
                 .is_none_or(|at| now_ms().saturating_sub(at) > 360_000);
         state
     }
-    pub fn refresh(&self) {
-        let _ = self.wake.send(());
+    pub fn refresh(&self) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if !state.enabled || state.refreshing || self.stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        state.refreshing = true;
+        self.manual_requested.store(true, Ordering::Release);
+        drop(state);
+        if !self.wake() {
+            self.manual_requested.store(false, Ordering::Release);
+            if let Ok(mut state) = self.state.lock() {
+                state.refreshing = false;
+                state.error = Some("额度查询服务已停止，请重启 SysMon。".to_string());
+            }
+            return false;
+        }
+        true
+    }
+    pub fn settings_changed(&self, enabled: bool) {
+        if let Ok(mut state) = self.state.lock() {
+            state.enabled = enabled;
+            if !enabled {
+                state.refreshing = false;
+                state.next_refresh_at_ms = None;
+                self.manual_requested.store(false, Ordering::Release);
+            }
+        }
+        self.wake();
+    }
+    fn wake(&self) -> bool {
+        matches!(
+            self.wake.try_send(()),
+            Ok(()) | Err(mpsc::TrySendError::Full(()))
+        )
     }
     pub fn shutdown(&self) {
         self.stop.store(true, Ordering::Relaxed);
-        self.refresh();
+        self.wake();
         let worker = self.worker.lock().ok().and_then(|mut slot| slot.take());
         if let Some(worker) = worker {
             let _ = worker.join();
@@ -452,26 +564,23 @@ pub fn start_worker(
             if let Ok(mut state) = monitor.state.lock() {
                 state.enabled = enabled;
             }
+            let manual_requested = monitor.manual_requested.swap(false, Ordering::AcqRel);
             if !enabled {
                 process = None;
                 if let Ok(mut state) = monitor.state.lock() {
                     state.refreshing = false;
                     state.next_refresh_at_ms = None;
                 }
-            } else if !was_enabled || Instant::now() >= due {
+                if was_enabled {
+                    crate::publish_codex_state(&app, &monitor);
+                }
+            } else if !was_enabled || manual_requested || Instant::now() >= due {
                 if let Ok(mut state) = monitor.state.lock() {
                     state.refreshing = true;
                 }
-                let result = (|| {
-                    if process.is_none() {
-                        process = Some(CodexProcess::start(&monitor.stop)?);
-                    }
-                    normalize_quota(&process.as_mut().unwrap().request(
-                        "account/rateLimits/read",
-                        None,
-                        &monitor.stop,
-                    )?)
-                })();
+                monitor.manual_requested.store(false, Ordering::Release);
+                crate::publish_codex_state(&app, &monitor);
+                let result = read_quota(&mut process, &monitor.stop);
                 let delay = match result {
                     Ok(buckets) => {
                         failures = 0;
@@ -488,7 +597,7 @@ pub fn start_worker(
                         if let Ok(mut state) = monitor.state.lock() {
                             state.error = Some(error);
                         }
-                        (REFRESH_SECS * 2_u64.pow(failures.min(3))).min(900)
+                        retry_delay_secs(failures)
                     }
                 };
                 due = Instant::now() + Duration::from_secs(delay);
@@ -496,18 +605,12 @@ pub fn start_worker(
                     state.refreshing = false;
                     state.next_refresh_at_ms = Some(now_ms() + delay * 1000);
                 }
+                crate::publish_codex_state(&app, &monitor);
             }
             was_enabled = enabled;
             notify(&app, &monitor, &mut memory);
             if receiver.recv_timeout(Duration::from_secs(1)).is_ok() {
                 while receiver.try_recv().is_ok() {}
-                let recently_updated = monitor
-                    .snapshot()
-                    .observed_at_ms
-                    .is_some_and(|at| now_ms().saturating_sub(at) < 10_000);
-                if !recently_updated {
-                    due = Instant::now();
-                }
             }
         }
     });
@@ -519,6 +622,178 @@ pub fn start_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_connection_is_replaced_before_retrying_and_success_is_reused() {
+        use std::sync::atomic::AtomicUsize;
+        struct Connection {
+            id: usize,
+            dropped: Arc<AtomicUsize>,
+        }
+        impl Drop for Connection {
+            fn drop(&mut self) {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let stop = AtomicBool::new(false);
+        let mut connection = None;
+        let mut connected = 0;
+        let mut queried = Vec::new();
+        let result = query_with_reconnect(
+            &mut connection,
+            &stop,
+            || {
+                connected += 1;
+                Ok(Connection {
+                    id: connected,
+                    dropped: Arc::clone(&dropped),
+                })
+            },
+            |connection| {
+                queried.push(connection.id);
+                if connection.id == 1 {
+                    Err("旧连接断开".to_string())
+                } else {
+                    Ok(77)
+                }
+            },
+        );
+        assert_eq!(result, Ok(77));
+        assert_eq!(queried, vec![1, 2]);
+        assert_eq!(connected, 2);
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        let next = query_with_reconnect(
+            &mut connection,
+            &stop,
+            || -> Result<Connection, String> { panic!("健康连接不应重建") },
+            |connection| Ok(connection.id),
+        );
+        assert_eq!(next, Ok(2));
+    }
+
+    #[test]
+    fn repeated_failure_stops_after_one_reconnect_and_keeps_last_error() {
+        let mut connection: Option<()> = None;
+        let stop = AtomicBool::new(false);
+        let mut attempts = 0;
+        let result: Result<(), String> = query_with_reconnect(
+            &mut connection,
+            &stop,
+            || {
+                attempts += 1;
+                Err(format!("启动失败 {attempts}"))
+            },
+            |_| panic!("启动失败时不应发送查询"),
+        );
+        assert_eq!(attempts, 2);
+        assert_eq!(result, Err("启动失败 2".to_string()));
+        assert!(connection.is_none());
+    }
+
+    #[test]
+    fn shutdown_prevents_reconnecting_after_a_failed_request() {
+        let stop = AtomicBool::new(false);
+        let mut connection = Some(());
+        let result: Result<(), String> = query_with_reconnect(
+            &mut connection,
+            &stop,
+            || panic!("停止后不应创建连接"),
+            |_| {
+                stop.store(true, Ordering::Relaxed);
+                Err("请求中断".to_string())
+            },
+        );
+        assert_eq!(result, Err("额度监测已停止。".to_string()));
+        assert!(connection.is_none());
+    }
+
+    #[test]
+    fn automatic_recovery_uses_short_bounded_delays_and_resets_after_success() {
+        assert_eq!(
+            (0..6).map(retry_delay_secs).collect::<Vec<_>>(),
+            vec![120, 15, 30, 60, 120, 120]
+        );
+        assert_eq!(retry_delay_secs(u32::MAX), 120);
+        assert_eq!(retry_delay_secs(0), REFRESH_SECS);
+    }
+
+    #[test]
+    fn manual_sync_is_immediate_and_coalesces_repeated_clicks() {
+        let (monitor, receiver) = CodexMonitor::new();
+        monitor.settings_changed(true);
+        {
+            let mut state = monitor.state.lock().unwrap();
+            state.observed_at_ms = Some(now_ms());
+            state.next_refresh_at_ms = Some(now_ms() + 900_000);
+            state.error = Some("网络暂时不可用".to_string());
+        }
+        assert!(monitor.refresh());
+        assert!(monitor.snapshot().refreshing);
+        assert!(!monitor.refresh());
+        assert!(monitor.manual_requested.swap(false, Ordering::AcqRel));
+        assert!(!monitor.manual_requested.swap(false, Ordering::AcqRel));
+        assert!(receiver.try_recv().is_ok());
+        assert!(receiver.try_recv().is_err());
+        monitor.state.lock().unwrap().refreshing = false;
+        assert!(monitor.refresh());
+    }
+
+    #[test]
+    fn disabled_or_stopped_monitor_does_not_accept_sync_requests() {
+        let (monitor, _receiver) = CodexMonitor::new();
+        assert!(!monitor.refresh());
+        monitor.settings_changed(true);
+        assert!(monitor.refresh());
+        monitor.settings_changed(false);
+        assert!(!monitor.snapshot().refreshing);
+        assert!(!monitor.manual_requested.load(Ordering::Acquire));
+        assert!(!monitor.refresh());
+        monitor.settings_changed(true);
+        monitor.shutdown();
+        assert!(!monitor.refresh());
+    }
+
+    #[test]
+    fn stopped_worker_reports_failure_instead_of_staying_busy() {
+        let (monitor, receiver) = CodexMonitor::new();
+        monitor.settings_changed(true);
+        drop(receiver);
+        assert!(!monitor.refresh());
+        let state = monitor.snapshot();
+        assert!(!state.refreshing);
+        assert!(state.stale);
+        assert!(state.error.unwrap().contains("请重启 SysMon"));
+    }
+
+    #[test]
+    fn tray_menu_tracks_sync_retry_disabled_and_success_states() {
+        let mut state = QuotaSnapshot::default();
+        assert_eq!(
+            state.sync_menu_state(),
+            ("同步 Codex 额度（监测已关闭）".to_string(), false)
+        );
+        state.enabled = true;
+        state.error = Some("网络暂时不可用".to_string());
+        assert_eq!(
+            state.sync_menu_state(),
+            ("重试同步 Codex 额度".to_string(), true)
+        );
+        state.refreshing = true;
+        assert_eq!(
+            state.sync_menu_state(),
+            ("正在同步 Codex 额度…".to_string(), false)
+        );
+        state.refreshing = false;
+        state.error = None;
+        state.observed_at_ms = Some(now_ms());
+        let (title, enabled) = state.sync_menu_state();
+        assert!(enabled);
+        assert!(title.starts_with("同步 Codex 额度（上次 "));
+        state.enabled = false;
+        assert!(!state.sync_menu_state().1);
+    }
+
     #[test]
     fn normalizes_all_buckets_without_leaking_account_fields() {
         let value = json!({"accountId":"private-account","rateLimits":{"primary":{"usedPercent":99}},"rateLimitsByLimitId":{"codex":{"planType":"plus","primary":{"usedPercent":23,"windowDurationMins":300,"resetsAt":1800000000},"secondary":{"usedPercent":4,"windowDurationMins":10080}},"extra":{"primary":{"usedPercent":105}}}});

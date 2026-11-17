@@ -53,11 +53,13 @@
         <span class="strip-metric" data-metric="codex_primary">
           <span class="strip-k">Codex <span data-codex-short="primary">5h</span></span>
           <span class="strip-v" data-codex-value="primary">--</span>
+          <span class="quota-reset-short" data-codex-reset-in="primary">未知</span>
         </span>
         <span class="strip-sep"></span>
         <span class="strip-metric" data-metric="codex_secondary">
           <span class="strip-k" data-codex-short="secondary">周</span>
           <span class="strip-v" data-codex-value="secondary">--</span>
+          <span class="quota-reset-short" data-codex-reset-in="secondary">未知</span>
         </span>
         <button type="button" id="btn-expand" class="icon-btn" title="展开" aria-label="展开">
           <span class="chevron down"></span>
@@ -76,13 +78,13 @@
         <span id="num-net" class="num-v net" data-metric="net">↓-- ↑--</span>
         <span class="num-sep">/</span>
         <span class="num-v" data-metric="codex_primary"
-          ><span data-codex-short="primary">5h</span
-          ><span data-codex-value="primary">--</span></span
+          ><span data-codex-short="primary">5h</span><span data-codex-value="primary">--</span
+          ><span class="quota-reset-short" data-codex-reset-in="primary">未知</span></span
         >
         <span class="num-sep">/</span>
         <span class="num-v" data-metric="codex_secondary"
-          ><span data-codex-short="secondary">周</span
-          ><span data-codex-value="secondary">--</span></span
+          ><span data-codex-short="secondary">周</span><span data-codex-value="secondary">--</span
+          ><span class="quota-reset-short" data-codex-reset-in="secondary">未知</span></span
         >
         <button type="button" id="btn-expand-num" class="icon-btn" title="展开" aria-label="展开">
           <span class="chevron down"></span>
@@ -113,11 +115,17 @@
         </div>
         <div class="v-item" data-metric="codex_primary">
           <span class="v-k">Codex <span data-codex-short="primary">5h</span></span>
-          <span class="v-v" data-codex-value="primary">--</span>
+          <span class="v-v"
+            ><span class="quota-reset-short" data-codex-reset-in="primary">未知</span
+            ><span data-codex-value="primary">--</span></span
+          >
         </div>
         <div class="v-item" data-metric="codex_secondary">
           <span class="v-k">Codex <span data-codex-short="secondary">周</span></span>
-          <span class="v-v" data-codex-value="secondary">--</span>
+          <span class="v-v"
+            ><span class="quota-reset-short" data-codex-reset-in="secondary">未知</span
+            ><span data-codex-value="secondary">--</span></span
+          >
         </div>
       </div>
 
