@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-close",
+  "description": "Allow the main panel to request closing to the tray",
+  "windows": ["main"],
+  "permissions": ["core:window:allow-close"]
+}

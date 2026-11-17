@@ -12,6 +12,7 @@ import { initializeHardware, isHardwareVisible, hardwareRevision } from './hardw
 import './codex.css';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
 
 interface DiskStat {
@@ -1269,6 +1270,8 @@ function showTab(tab: TabId) {
   const settingsView = document.querySelector('#view-settings') as HTMLElement | null;
   if (monitorView) monitorView.hidden = tab !== 'monitor';
   if (settingsView) settingsView.hidden = tab !== 'settings';
+  const closeBtn = document.querySelector<HTMLButtonElement>('#btn-close-settings');
+  if (closeBtn) closeBtn.hidden = tab !== 'settings';
 }
 
 async function switchTab(tab: TabId) {
@@ -1312,6 +1315,20 @@ async function switchTab(tab: TabId) {
 }
 
 function bindSettingsUi() {
+  const closeBtn = document.querySelector<HTMLButtonElement>('#btn-close-settings');
+  closeBtn?.addEventListener('click', async () => {
+    if (closeBtn.disabled) return;
+    closeBtn.disabled = true;
+    try {
+      await getCurrentWindow().close();
+    } catch (error) {
+      console.error('关闭设置面板失败', error);
+      showSettingsMessage('关闭面板失败，请重试', 'error');
+    } finally {
+      closeBtn.disabled = false;
+    }
+  });
+
   const tabs = document.querySelectorAll<HTMLButtonElement>('.tab');
   tabs.forEach((btn) => {
     btn.addEventListener('click', () => {

@@ -73,6 +73,10 @@ let hideTimer: number | undefined;
 let pinnedExpanded = false;
 let overlayEnabled = true;
 let clickThroughEnabled = false;
+let overlaySettingsRevision = 0;
+let overlayConfigRequest = 0;
+let overlayConfigLoaded = false;
+let overlayStyleApplied = false;
 let ignoreActive = false;
 let ignoreDesired = false;
 let ignoreApplyPromise: Promise<void> | null = null;
@@ -380,7 +384,7 @@ function enqueueLayout(task: () => Promise<void>): Promise<void> {
   return run;
 }
 
-async function applyLayout(next: OverlayMode, force = false) {
+async function applyLayout(next: OverlayMode, force = false, nextStyle?: OverlayStyle) {
   if (!force && mode === next) return;
   await enqueueLayout(async () => {
     if (!force && mode === next) return;
@@ -389,6 +393,11 @@ async function applyLayout(next: OverlayMode, force = false) {
     try {
       root?.classList.add('layout-switching');
       await invoke('set_overlay_layout', { mode: next });
+      if (nextStyle !== undefined) {
+        style = nextStyle;
+        applyStyleClass(style);
+        overlayStyleApplied = true;
+      }
       mode = next;
       applyModeClass(mode);
       // 每秒只更新当前可见视图，切换后需立即刷新一次新视图
@@ -440,7 +449,9 @@ async function revealFromPeek() {
 
 function applyOverlayMetrics(ids: string[] | undefined) {
   const next = new Set((ids ?? []).filter((id) => DEFAULT_OVERLAY_METRICS.includes(id)));
-  overlayMetrics = next.size ? next : new Set(DEFAULT_OVERLAY_METRICS);
+  const normalized = next.size ? next : new Set(DEFAULT_OVERLAY_METRICS);
+  const changed = [...overlayMetrics].join(',') !== [...normalized].join(',');
+  overlayMetrics = normalized;
 
   const hideMetric = (el: Element, metric: string) => {
     if (el instanceof HTMLElement) el.hidden = !overlayMetrics.has(metric);
@@ -476,38 +487,50 @@ function applyOverlayMetrics(ids: string[] | undefined) {
 
   syncSeps(document.querySelector('.strip'), '.strip-sep');
   syncSeps(document.querySelector('.numeric-strip'), '.num-sep');
+  return changed;
 }
 
 async function applyOverlayStyle(next: OverlayStyle) {
-  style = next;
-  applyStyleClass(style);
-  if (mode === 'expanded') {
-    pinnedExpanded = false;
-    clearHideTimer();
-    await setMode('collapsed');
-    return;
-  }
-  if (mode === 'peek') {
-    return;
-  }
-  await applyLayout(mode, true);
+  pinnedExpanded = false;
+  clearHideTimer();
+  await applyLayout('collapsed', true, next);
+  if (canPeekHide()) scheduleAutoHide();
 }
 
 async function loadOverlayConfig() {
+  const revision = overlaySettingsRevision;
+  const request = ++overlayConfigRequest;
   try {
     const cfg = await invoke<AppConfig>('get_app_config');
+    // 旧快照不得覆盖读取期间收到的设置事件或更新的读取结果。
+    if (revision !== overlaySettingsRevision || request !== overlayConfigRequest) return;
+    const initial = !overlayConfigLoaded;
+    const wasEnabled = overlayEnabled;
+    const wasAutoHide = autoHide;
+    const wasClickThrough = clickThroughEnabled;
+    const previousEdge = edgeX;
     overlayEnabled = cfg.overlayEnabled !== false;
     autoHide = !!cfg.overlayAutoHide;
     clickThroughEnabled = !!cfg.overlayClickThrough;
     edgeX = cfg.overlayEdgeX === 'left' || cfg.overlayEdgeX === 'right' ? cfg.overlayEdgeX : null;
-    applyOverlayMetrics(cfg.overlayMetrics);
-    await applyOverlayStyle(normalizeStyle(cfg.overlayStyle));
-    if (canPeekHide() && mode === 'collapsed') {
-      await setMode('peek');
-    } else if (mode === 'peek' && !canPeekHide()) {
-      await setMode('collapsed');
+    const metricsChanged = applyOverlayMetrics(cfg.overlayMetrics);
+    const nextStyle = normalizeStyle(cfg.overlayStyle);
+    if (!overlayStyleApplied || nextStyle !== style) {
+      await applyOverlayStyle(nextStyle);
+    } else if (metricsChanged && mode === 'collapsed') {
+      await applyLayout(mode, true);
     }
-    await syncClickThroughRuntime();
+    if (initial || wasAutoHide !== autoHide || previousEdge !== edgeX) {
+      if (canPeekHide() && !pinnedExpanded) {
+        scheduleAutoHide();
+      } else if (mode === 'peek' && !canPeekHide()) {
+        await setMode('collapsed');
+      }
+    }
+    if (initial || wasEnabled !== overlayEnabled || wasClickThrough !== clickThroughEnabled) {
+      await syncClickThroughRuntime();
+    }
+    overlayConfigLoaded = true;
   } catch (error) {
     console.error('加载叠加层配置失败', error);
   }
@@ -818,6 +841,80 @@ window.addEventListener('contextmenu', (event) => {
   event.preventDefault();
 });
 
+async function initializeOverlaySettings() {
+  const update = (operation: Promise<void>) => {
+    void operation.catch((error) => console.error('同步叠加层设置失败', error));
+  };
+  const subscriptions = [
+    listen<boolean>('overlay-enabled-changed', (event) => {
+      overlaySettingsRevision += 1;
+      overlayEnabled = !!event.payload;
+      if (overlayEnabled) {
+        update(syncClickThroughRuntime());
+      } else {
+        update(disableClickThroughRuntime());
+      }
+    }),
+
+    listen<boolean>('overlay-auto-hide-changed', (event) => {
+      overlaySettingsRevision += 1;
+      autoHide = !!event.payload;
+      if (canPeekHide()) {
+        if (!pinnedExpanded && mode !== 'peek') {
+          scheduleAutoHide();
+        }
+      } else if (mode === 'peek') {
+        update(setMode('collapsed'));
+      }
+    }),
+
+    listen<boolean>('overlay-click-through-changed', (event) => {
+      overlaySettingsRevision += 1;
+      clickThroughEnabled = !!event.payload;
+      update(syncClickThroughRuntime());
+    }),
+
+    listen<string>('overlay-style-changed', (event) => {
+      overlaySettingsRevision += 1;
+      update(applyOverlayStyle(normalizeStyle(event.payload)));
+    }),
+
+    listen<string[]>('overlay-metrics-changed', (event) => {
+      overlaySettingsRevision += 1;
+      applyOverlayMetrics(event.payload);
+      if (mode === 'collapsed') {
+        update(applyLayout(mode, true));
+      }
+    }),
+
+    listen<'left' | 'right'>('overlay-snap-edge', (event) => {
+      overlaySettingsRevision += 1;
+      edgeX = event.payload === 'left' || event.payload === 'right' ? event.payload : edgeX;
+      if (!canPeekHide() || pinnedExpanded) return;
+      scheduleAutoHide();
+    }),
+    listen<boolean>('window-visibility-changed', (event) => {
+      if (event.payload) update(loadOverlayConfig());
+    }),
+  ];
+  const unlisteners = await Promise.all(
+    subscriptions.map((subscription) =>
+      subscription.catch((error) => {
+        console.error('注册叠加层设置事件失败', error);
+        return () => {};
+      }),
+    ),
+  );
+  await loadOverlayConfig();
+  const watchdog = window.setInterval(() => {
+    if (isHardwareVisible()) return loadOverlayConfig();
+  }, 5000);
+  window.addEventListener('beforeunload', () => {
+    window.clearInterval(watchdog);
+    unlisteners.forEach((unlisten) => unlisten());
+  });
+}
+
 window.addEventListener('DOMContentLoaded', () => {
   initializeCodex();
   initializeHardware<Metrics>(refreshOverlay);
@@ -825,48 +922,5 @@ window.addEventListener('DOMContentLoaded', () => {
   applyStyleClass('capsule');
   applyModeClass('collapsed');
   mode = 'collapsed';
-  // 仅按最终配置 resize 一次；窗口初始尺寸即 collapsed capsule 尺寸，配置加载失败也无需回退
-  void loadOverlayConfig();
-
-  void listen<boolean>('overlay-enabled-changed', (event) => {
-    overlayEnabled = !!event.payload;
-    if (overlayEnabled) {
-      void syncClickThroughRuntime();
-    } else {
-      void disableClickThroughRuntime();
-    }
-  });
-
-  void listen<boolean>('overlay-auto-hide-changed', (event) => {
-    autoHide = !!event.payload;
-    if (canPeekHide()) {
-      if (!pinnedExpanded && mode !== 'peek') {
-        scheduleAutoHide();
-      }
-    } else if (mode === 'peek') {
-      void setMode('collapsed');
-    }
-  });
-
-  void listen<boolean>('overlay-click-through-changed', (event) => {
-    clickThroughEnabled = !!event.payload;
-    void syncClickThroughRuntime();
-  });
-
-  void listen<string>('overlay-style-changed', (event) => {
-    void applyOverlayStyle(normalizeStyle(event.payload));
-  });
-
-  void listen<string[]>('overlay-metrics-changed', (event) => {
-    applyOverlayMetrics(event.payload);
-    if (mode === 'collapsed') {
-      void applyLayout(mode, true);
-    }
-  });
-
-  void listen<'left' | 'right'>('overlay-snap-edge', (event) => {
-    edgeX = event.payload === 'left' || event.payload === 'right' ? event.payload : edgeX;
-    if (!canPeekHide() || pinnedExpanded) return;
-    scheduleAutoHide();
-  });
+  void initializeOverlaySettings().catch((error) => console.error('初始化叠加层设置失败', error));
 });

@@ -13,7 +13,19 @@
         <h1 data-tauri-drag-region>
           系统监测 <span id="app-version" class="app-version muted">v--</span>
         </h1>
-        <span id="updated-at" class="muted" data-tauri-drag-region>--</span>
+        <div class="panel-header-actions">
+          <span id="updated-at" class="muted" data-tauri-drag-region>--</span>
+          <button
+            type="button"
+            id="btn-close-settings"
+            class="btn tiny"
+            title="隐藏面板，继续在托盘运行"
+            aria-label="关闭设置面板"
+            hidden
+          >
+            关闭
+          </button>
+        </div>
       </header>
 
       <nav class="tabs" role="tablist">

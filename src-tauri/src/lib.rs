@@ -639,11 +639,6 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
     app.state::<SharedCodex>().settings_changed(input.codex_enabled);
     publish_codex_state(app, &app.state::<SharedCodex>());
     let _ = app.emit("codex-settings-changed", input.codex_enabled);
-    if input.overlay_enabled {
-        if let Err(err) = apply_overlay_layout(OverlayLayoutMode::Collapsed, app) {
-            eprintln!("按指标重算叠加层尺寸失败: {err}");
-        }
-    }
 
     if input.notification_enabled {
         // 测试通知失败不影响保存结果
