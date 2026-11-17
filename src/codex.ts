@@ -1,5 +1,6 @@
+import { isHardwareVisible, hardwareRevision, onHardwareVisibility } from './hardware';
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 interface QuotaWindow {
   id: string;
@@ -87,8 +88,17 @@ function element(tag: string, className: string, text?: string): HTMLElement {
 export function initializeCodex() {
   let current: QuotaSnapshot | null = null;
   let busy = false;
+  let requested = false;
+  let disposed = false;
+  const unlisteners: UnlistenFn[] = [];
+  const register = async (promise: Promise<UnlistenFn>) => {
+    const stop = await promise;
+    if (disposed) stop();
+    else unlisteners.push(stop);
+  };
   let signature = '';
   const render = (snapshot: QuotaSnapshot) => {
+    if (disposed || !isHardwareVisible()) return;
     current = snapshot;
     const fresh = snapshot.enabled && !snapshot.stale;
     const primaryBucket = snapshot.buckets.find((b) => b.id === 'codex') ?? snapshot.buckets[0];
@@ -234,43 +244,61 @@ export function initializeCodex() {
     }
   };
   const poll = async () => {
-    if (busy) return;
+    if (disposed || !isHardwareVisible()) return;
+    if (busy) {
+      requested = true;
+      return;
+    }
     busy = true;
+    requested = false;
+    const revision = hardwareRevision();
     try {
-      render(await invoke<QuotaSnapshot>('get_codex_quota'));
+      const snapshot = await invoke<QuotaSnapshot>('get_codex_quota');
+      if (revision === hardwareRevision()) render(snapshot);
     } catch {
-      if (current)
+      if (current && revision === hardwareRevision())
         render({ ...current, stale: true, refreshing: false, error: '额度数据暂时无法读取' });
     } finally {
       busy = false;
+      if (requested && !disposed) void poll();
     }
   };
   document.querySelectorAll<HTMLButtonElement>('[data-codex-refresh]').forEach((button) => {
     button.addEventListener('click', async () => {
+      if (!isHardwareVisible() || disposed) return;
+      const revision = hardwareRevision();
       button.disabled = true;
       try {
-        render(await invoke<QuotaSnapshot>('refresh_codex_quota'));
+        const snapshot = await invoke<QuotaSnapshot>('refresh_codex_quota');
+        if (revision === hardwareRevision()) render(snapshot);
       } catch {
-        if (current)
+        if (current && revision === hardwareRevision())
           render({ ...current, stale: true, refreshing: false, error: '刷新请求失败，请稍后重试' });
       } finally {
-        window.setTimeout(() => {
-          void poll();
-        }, 300);
+        void poll();
       }
     });
   });
-  void listen('codex-settings-changed', () => {
-    void poll();
-  });
-  void listen('codex-quota-updated', () => {
-    void poll();
-  });
+  void register(
+    listen('codex-settings-changed', () => {
+      void poll();
+    }),
+  ).catch(console.error);
+  void register(
+    listen('codex-quota-updated', () => {
+      void poll();
+    }),
+  ).catch(console.error);
   void poll();
-  window.setInterval(() => {
+  const fallback = window.setInterval(() => {
     void poll();
-  }, 2000);
-  window.setInterval(() => {
+  }, 60000);
+  const stopVisibility = onHardwareVisibility((visible) => {
+    if (visible) void poll();
+  });
+  const countdown = window.setInterval(() => {
+    if (disposed || !isHardwareVisible()) return;
+    if (current) render(current);
     document.querySelectorAll<HTMLElement>('[data-codex-reset-compact]').forEach((node) => {
       node.textContent = compactResetText(Number(node.dataset.codexResetCompact));
     });
@@ -278,4 +306,15 @@ export function initializeCodex() {
       node.textContent = resetText(Number(node.dataset.codexReset));
     });
   }, 1000);
+  window.addEventListener(
+    'beforeunload',
+    () => {
+      disposed = true;
+      stopVisibility();
+      window.clearInterval(fallback);
+      window.clearInterval(countdown);
+      unlisteners.forEach((stop) => stop());
+    },
+    { once: true },
+  );
 }

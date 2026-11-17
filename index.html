@@ -378,6 +378,14 @@
                 </label>
 
                 <label class="field">
+                  <span class="field-label">网速统计网卡</span>
+                  <select id="setting-network-interface">
+                    <option value="auto">自动选择单一网卡</option>
+                    <option value="all">全部接口汇总（可能重复统计）</option>
+                  </select>
+                </label>
+
+                <label class="field">
                   <span class="field-label">历史时长</span>
                   <select id="setting-history-range">
                     <option value="1">1 分钟</option>
@@ -422,6 +430,11 @@
               </div>
             </section>
 
+            <details id="monitor-diagnostics" class="metric-card settings-card">
+              <summary>监测诊断</summary>
+              <pre id="diagnostics-output" class="settings-hint">展开后读取诊断状态</pre>
+              <button type="button" id="refresh-diagnostics" class="btn">刷新诊断</button>
+            </details>
             <div id="settings-message" class="settings-message muted" hidden></div>
           </div>
 

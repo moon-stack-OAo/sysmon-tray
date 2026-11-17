@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const DEFAULT_COOLDOWN_SECS: u64 = 60;
+const SAMPLE_CONTINUITY_MAX_INTERVAL: Duration = Duration::from_secs(5);
 /// 百分比类（CPU / 内存 / 磁盘）解除线相对触发线的回差
 const HYSTERESIS_PERCENT: f32 = 3.0;
 /// 温度解除线相对触发线的回差（°C）
@@ -106,13 +107,16 @@ impl AlertStatus {
     }
 }
 
+struct AlertObservation {
+    exceeded_since: Option<Instant>,
+    notified: bool,
+}
+
 pub struct AlertEngine {
     thresholds: AlertThresholds,
     last_fired: HashMap<AlertKind, Instant>,
-    /// 已越过触发线；降到解除线以下才清除。latched 期间不再 fire，避免贴线抖动连发。
-    latched: HashMap<AlertKind, bool>,
-    /// 首次越过触发线的时刻；持续不足 sustain 时不通知。降到解除线以下清除。
-    exceeded_since: HashMap<AlertKind, Instant>,
+    observations: HashMap<AlertKind, AlertObservation>,
+    last_sample: Option<(u128, Instant)>,
 }
 
 impl AlertEngine {
@@ -120,9 +124,14 @@ impl AlertEngine {
         Self {
             thresholds,
             last_fired: HashMap::new(),
-            latched: HashMap::new(),
-            exceeded_since: HashMap::new(),
+            observations: HashMap::new(),
+            last_sample: None,
         }
+    }
+
+    pub fn interrupt_sampling(&mut self) {
+        self.observations.clear();
+        self.last_sample = None;
     }
 
     pub fn thresholds(&self) -> AlertThresholds {
@@ -130,30 +139,44 @@ impl AlertEngine {
     }
 
     pub fn set_thresholds(&mut self, thresholds: AlertThresholds) {
+        if self.thresholds != thresholds {
+            self.observations.clear();
+            self.last_sample = None;
+        }
         self.thresholds = thresholds;
     }
 
-    /// 根据当前指标评估告警。不写 last_fired；返回 (状态, 本次新触发且已过冷却的通知)。
+    /// 根据当前指标评估告警。不写 last_fired；返回 (状态, 持续超限且已过冷却的待发送通知)。
     /// 通知是否真正发出由调用方决定，成功后再 `mark_fired`。
     pub fn evaluate(
         &mut self,
         metrics: &Metrics,
         sustain: Duration,
     ) -> (AlertStatus, Vec<(AlertKind, String)>) {
+        self.evaluate_at(metrics, sustain, Instant::now())
+    }
+
+    fn evaluate_at(
+        &mut self,
+        metrics: &Metrics,
+        sustain: Duration,
+        now: Instant,
+    ) -> (AlertStatus, Vec<(AlertKind, String)>) {
+        let observed_at = self.observe_sample(metrics.sampled_at_ms, now);
         let t = self.thresholds.clone();
         let mut messages = Vec::new();
         let mut newly_fired = Vec::new();
 
-        let cpu_rising = self.rising_edge(AlertKind::Cpu, metrics.cpu_percent, t.cpu_percent);
         let cpu = self.observe(
             AlertKind::Cpu,
             metrics.cpu_percent,
             t.cpu_percent,
             HYSTERESIS_PERCENT,
+            observed_at,
         );
         if cpu {
             messages.push(format!("CPU {:.0}%", metrics.cpu_percent));
-            if cpu_rising && self.should_fire(AlertKind::Cpu, sustain) {
+            if self.should_fire(AlertKind::Cpu, sustain, observed_at, now) {
                 newly_fired.push((
                     AlertKind::Cpu,
                     format!(
@@ -164,17 +187,16 @@ impl AlertEngine {
             }
         }
 
-        let memory_rising =
-            self.rising_edge(AlertKind::Memory, metrics.memory_percent, t.memory_percent);
         let memory = self.observe(
             AlertKind::Memory,
             metrics.memory_percent,
             t.memory_percent,
             HYSTERESIS_PERCENT,
+            observed_at,
         );
         if memory {
             messages.push(format!("内存 {:.0}%", metrics.memory_percent));
-            if memory_rising && self.should_fire(AlertKind::Memory, sustain) {
+            if self.should_fire(AlertKind::Memory, sustain, observed_at, now) {
                 newly_fired.push((
                     AlertKind::Memory,
                     format!(
@@ -187,16 +209,16 @@ impl AlertEngine {
 
         let temperature = match metrics.cpu_temp_celsius {
             Some(temp) => {
-                let rising = self.rising_edge(AlertKind::Temperature, temp, t.cpu_temp_celsius);
                 let active = self.observe(
                     AlertKind::Temperature,
                     temp,
                     t.cpu_temp_celsius,
                     HYSTERESIS_TEMP,
+                    observed_at,
                 );
                 if active {
                     messages.push(format!("温度 {:.0}°C", temp));
-                    if rising && self.should_fire(AlertKind::Temperature, sustain) {
+                    if self.should_fire(AlertKind::Temperature, sustain, observed_at, now) {
                         newly_fired.push((
                             AlertKind::Temperature,
                             format!(
@@ -217,6 +239,9 @@ impl AlertEngine {
         let mut disk_peak = 0.0_f32;
         let mut disk_notify = Vec::new();
         for d in &metrics.disks {
+            if !d.used_percent.is_finite() {
+                continue;
+            }
             if d.used_percent > disk_peak {
                 disk_peak = d.used_percent;
             }
@@ -233,17 +258,17 @@ impl AlertEngine {
                 d.used_percent, t.disk_percent
             ));
         }
-        let disk_rising = self.rising_edge(AlertKind::Disk, disk_peak, t.disk_percent);
         let disk = self.observe(
             AlertKind::Disk,
             disk_peak,
             t.disk_percent,
             HYSTERESIS_PERCENT,
+            observed_at,
         );
         if disk {
             let release = (t.disk_percent - HYSTERESIS_PERCENT).max(0.0);
             for d in &metrics.disks {
-                if d.used_percent < release {
+                if !d.used_percent.is_finite() || d.used_percent < release {
                     continue;
                 }
                 let mount = if d.mount_point.is_empty() {
@@ -253,7 +278,7 @@ impl AlertEngine {
                 };
                 messages.push(format!("{mount} {:.0}%", d.used_percent));
             }
-            if disk_rising && self.should_fire(AlertKind::Disk, sustain) {
+            if self.should_fire(AlertKind::Disk, sustain, observed_at, now) {
                 for msg in disk_notify {
                     newly_fired.push((AlertKind::Disk, msg));
                 }
@@ -263,22 +288,19 @@ impl AlertEngine {
         let gpu_load = metrics.gpu.as_ref().and_then(|g| g.load_percent);
         let gpu = match gpu_load {
             Some(load) => {
-                let rising = self.rising_edge(AlertKind::Gpu, load, t.gpu_percent);
                 let active = self.observe(
                     AlertKind::Gpu,
                     load,
                     t.gpu_percent,
                     HYSTERESIS_PERCENT,
+                    observed_at,
                 );
                 if active {
                     messages.push(format!("GPU {:.0}%", load));
-                    if rising && self.should_fire(AlertKind::Gpu, sustain) {
+                    if self.should_fire(AlertKind::Gpu, sustain, observed_at, now) {
                         newly_fired.push((
                             AlertKind::Gpu,
-                            format!(
-                                "GPU 占用过高：{:.1}%（阈值 {:.0}%）",
-                                load, t.gpu_percent
-                            ),
+                            format!("GPU 占用过高：{:.1}%（阈值 {:.0}%）", load, t.gpu_percent),
                         ));
                     }
                 }
@@ -308,64 +330,424 @@ impl AlertEngine {
 
     /// 仅在通知实际 show 成功后记账，避免评估阶段或通知关闭时吃掉冷却。
     pub fn mark_fired(&mut self, kinds: &[AlertKind]) {
-        let now = Instant::now();
-        for kind in kinds {
-            self.last_fired.insert(*kind, now);
-        }
+        self.mark_fired_at(kinds, Instant::now());
     }
 
-    fn is_latched(&self, kind: AlertKind) -> bool {
-        self.latched.get(&kind).copied().unwrap_or(false)
+    fn mark_fired_at(&mut self, kinds: &[AlertKind], now: Instant) {
+        for kind in kinds {
+            self.last_fired.insert(*kind, now);
+            if let Some(observation) = self.observations.get_mut(kind) {
+                observation.notified = true;
+            }
+        }
     }
 
     fn clear_latch(&mut self, kind: AlertKind) {
-        self.latched.insert(kind, false);
-        self.exceeded_since.remove(&kind);
+        self.observations.remove(&kind);
     }
 
-    /// 本帧从未 latched 跨过触发线。须在 observe 更新 latch 之前调用。
-    fn rising_edge(&self, kind: AlertKind, value: f32, threshold: f32) -> bool {
-        !self.is_latched(kind) && value >= threshold
-    }
-
-    /// 未 latched 用触发线；已 latched 只有降到解除线以下才清除。
-    fn observe(&mut self, kind: AlertKind, value: f32, threshold: f32, hysteresis: f32) -> bool {
-        let release = (threshold - hysteresis).max(0.0);
-        if self.is_latched(kind) {
-            if value < release {
-                self.clear_latch(kind);
-                false
-            } else {
-                true
+    fn observe_sample(&mut self, sampled_at_ms: u128, now: Instant) -> Instant {
+        if let Some((previous_ms, previous_at)) = self.last_sample {
+            let interrupted = now.saturating_duration_since(previous_at)
+                > SAMPLE_CONTINUITY_MAX_INTERVAL
+                || sampled_at_ms < previous_ms
+                || sampled_at_ms.saturating_sub(previous_ms)
+                    > SAMPLE_CONTINUITY_MAX_INTERVAL.as_millis();
+            if interrupted {
+                self.observations.clear();
+            } else if sampled_at_ms == previous_ms {
+                return previous_at;
             }
-        } else if value < release {
-            // 未越过触发线且已回到解除线以下：丢掉持续计时，避免贴线断续累计
-            self.exceeded_since.remove(&kind);
-            false
-        } else if value >= threshold {
-            self.latched.insert(kind, true);
-            true
-        } else {
-            false
         }
+        self.last_sample = Some((sampled_at_ms, now));
+        now
     }
 
-    /// 冷却只限制同一次恢复后的重复触发。不修改 last_fired；latched 期间由 rising_edge 挡住。
-    /// sustain 大于 0 且超过触发线的持续时间不足时，本次不通知也不记账。
-    fn should_fire(&mut self, kind: AlertKind, sustain: Duration) -> bool {
-        if !sustain.is_zero() {
-            let now = Instant::now();
-            let since = self.exceeded_since.entry(kind).or_insert(now);
-            if now.duration_since(*since) < sustain {
-                return false;
-            }
+    fn observe(
+        &mut self,
+        kind: AlertKind,
+        value: f32,
+        threshold: f32,
+        hysteresis: f32,
+        observed_at: Instant,
+    ) -> bool {
+        let release = (threshold - hysteresis).max(0.0);
+        if !value.is_finite() || value < release {
+            self.clear_latch(kind);
+            return false;
+        }
+        if value >= threshold {
+            self.observations
+                .entry(kind)
+                .or_insert(AlertObservation {
+                    exceeded_since: None,
+                    notified: false,
+                })
+                .exceeded_since
+                .get_or_insert(observed_at);
+        } else if let Some(observation) = self.observations.get_mut(&kind) {
+            observation.exceeded_since = None;
+        }
+        self.observations.contains_key(&kind)
+    }
+
+    fn should_fire(
+        &self,
+        kind: AlertKind,
+        sustain: Duration,
+        observed_at: Instant,
+        now: Instant,
+    ) -> bool {
+        let Some(observation) = self.observations.get(&kind) else {
+            return false;
+        };
+        if observation.notified
+            || observation
+                .exceeded_since
+                .is_none_or(|since| observed_at.saturating_duration_since(since) < sustain)
+        {
+            return false;
         }
         let cooldown = Duration::from_secs(self.thresholds.cooldown_secs.max(1));
         match self.last_fired.get(&kind) {
-            Some(last) if last.elapsed() < cooldown => false,
+            Some(last) if now.saturating_duration_since(*last) < cooldown => false,
             _ => true,
         }
     }
 }
 
 pub type SharedAlerts = Mutex<AlertEngine>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::monitor::DiskStat;
+    use crate::temperature_lhm::GpuMetrics;
+
+    const SUSTAIN: Duration = Duration::from_secs(5);
+
+    fn metrics(second: u64) -> Metrics {
+        Metrics {
+            cpu_percent: 95.0,
+            memory_used_bytes: 0,
+            memory_total_bytes: 0,
+            memory_percent: 0.0,
+            swap_used_bytes: 0,
+            swap_total_bytes: 0,
+            net_down_bps: 0,
+            net_up_bps: 0,
+            net_interface: None,
+            net_link: "down".to_string(),
+            disks: Vec::new(),
+            cpu_temp_celsius: None,
+            gpu: None,
+            fans: Vec::new(),
+            sampled_at_ms: 1_800_000_000_000 + u128::from(second) * 1000,
+        }
+    }
+
+    fn tick(
+        engine: &mut AlertEngine,
+        start: Instant,
+        second: u64,
+        value: &Metrics,
+    ) -> (AlertStatus, Vec<(AlertKind, String)>) {
+        engine.evaluate_at(value, SUSTAIN, start + Duration::from_secs(second))
+    }
+
+    fn gpu(load: f32) -> GpuMetrics {
+        GpuMetrics {
+            name: "test".to_string(),
+            load_percent: Some(load),
+            memory_used_bytes: None,
+            memory_total_bytes: None,
+            memory_percent: None,
+            temp_celsius: None,
+        }
+    }
+
+    #[test]
+    fn sustained_high_load_fires_after_five_seconds_and_success_deduplicates() {
+        let start = Instant::now();
+        let mut engine = AlertEngine::with_thresholds(AlertThresholds::default());
+        for second in 0..5 {
+            let (status, pending) = tick(&mut engine, start, second, &metrics(second));
+            assert!(status.cpu);
+            assert!(pending.is_empty());
+        }
+        let (_, pending) = tick(&mut engine, start, 5, &metrics(5));
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, AlertKind::Cpu);
+        engine.mark_fired_at(&[AlertKind::Cpu], start + Duration::from_secs(5));
+        for second in 6..70 {
+            assert!(tick(&mut engine, start, second, &metrics(second))
+                .1
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn short_spike_and_dip_within_hysteresis_restart_sustain() {
+        let start = Instant::now();
+        let mut engine = AlertEngine::with_thresholds(AlertThresholds::default());
+        for second in 0..4 {
+            assert!(tick(&mut engine, start, second, &metrics(second))
+                .1
+                .is_empty());
+        }
+        let mut dip = metrics(4);
+        dip.cpu_percent = 89.0;
+        let (status, pending) = tick(&mut engine, start, 4, &dip);
+        assert!(status.cpu);
+        assert!(pending.is_empty());
+        for second in 5..10 {
+            assert!(tick(&mut engine, start, second, &metrics(second))
+                .1
+                .is_empty());
+        }
+        assert_eq!(tick(&mut engine, start, 10, &metrics(10)).1.len(), 1);
+        let mut recovered = metrics(11);
+        recovered.cpu_percent = 86.0;
+        let (status, pending) = tick(&mut engine, start, 11, &recovered);
+        assert!(!status.cpu);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn failed_or_suppressed_notifications_remain_pending_until_success() {
+        let start = Instant::now();
+        let mut engine = AlertEngine::with_thresholds(AlertThresholds::default());
+        for second in 0..5 {
+            tick(&mut engine, start, second, &metrics(second));
+        }
+        for second in 5..12 {
+            assert_eq!(
+                tick(&mut engine, start, second, &metrics(second)).1.len(),
+                1
+            );
+        }
+        engine.mark_fired_at(&[AlertKind::Cpu], start + Duration::from_secs(11));
+        assert!(tick(&mut engine, start, 12, &metrics(12)).1.is_empty());
+    }
+
+    #[test]
+    fn recovered_episode_waits_for_cooldown_then_notifies_without_another_edge() {
+        let start = Instant::now();
+        let mut thresholds = AlertThresholds::default();
+        thresholds.cooldown_secs = 10;
+        let mut engine = AlertEngine::with_thresholds(thresholds);
+        for second in 0..=5 {
+            tick(&mut engine, start, second, &metrics(second));
+        }
+        engine.mark_fired_at(&[AlertKind::Cpu], start + Duration::from_secs(5));
+        let mut recovered = metrics(6);
+        recovered.cpu_percent = 0.0;
+        tick(&mut engine, start, 6, &recovered);
+        for second in 7..15 {
+            assert!(tick(&mut engine, start, second, &metrics(second))
+                .1
+                .is_empty());
+        }
+        assert_eq!(tick(&mut engine, start, 15, &metrics(15)).1.len(), 1);
+    }
+
+    #[test]
+    fn cached_frame_does_not_advance_sustain() {
+        let start = Instant::now();
+        let mut engine = AlertEngine::with_thresholds(AlertThresholds::default());
+        let cached = metrics(0);
+        tick(&mut engine, start, 0, &cached);
+        assert!(tick(&mut engine, start, 5, &cached).1.is_empty());
+        assert!(tick(&mut engine, start, 6, &metrics(6)).1.is_empty());
+        for second in 7..11 {
+            assert!(tick(&mut engine, start, second, &metrics(second))
+                .1
+                .is_empty());
+        }
+        assert_eq!(tick(&mut engine, start, 11, &metrics(11)).1.len(), 1);
+    }
+
+    #[test]
+    fn interrupted_sampling_and_clock_changes_restart_sustain() {
+        for (observed_second, sample_second) in [(20, 20), (5, 20), (5, 1)] {
+            let start = Instant::now();
+            let mut engine = AlertEngine::with_thresholds(AlertThresholds::default());
+            for second in 0..5 {
+                tick(&mut engine, start, second, &metrics(second));
+            }
+            for offset in 0..5 {
+                let sample = metrics(sample_second + offset);
+                assert!(tick(&mut engine, start, observed_second + offset, &sample)
+                    .1
+                    .is_empty());
+            }
+            assert_eq!(
+                tick(
+                    &mut engine,
+                    start,
+                    observed_second + 5,
+                    &metrics(sample_second + 5),
+                )
+                .1
+                .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn missing_temperature_and_gpu_clear_their_pending_episodes() {
+        let start = Instant::now();
+        let mut engine = AlertEngine::with_thresholds(AlertThresholds::default());
+        for second in 0..5 {
+            let mut value = metrics(second);
+            value.cpu_percent = 0.0;
+            value.cpu_temp_celsius = Some(95.0);
+            value.gpu = Some(gpu(95.0));
+            assert!(tick(&mut engine, start, second, &value).1.is_empty());
+        }
+        let mut missing = metrics(5);
+        missing.cpu_percent = 0.0;
+        let (status, pending) = tick(&mut engine, start, 5, &missing);
+        assert!(!status.temperature && !status.gpu);
+        assert!(pending.is_empty());
+        for second in 6..=11 {
+            let mut value = metrics(second);
+            value.cpu_percent = 0.0;
+            value.cpu_temp_celsius = Some(95.0);
+            value.gpu = Some(gpu(95.0));
+            let (_, pending) = tick(&mut engine, start, second, &value);
+            assert_eq!(pending.len(), if second == 11 { 2 } else { 0 });
+        }
+    }
+
+    #[test]
+    fn non_finite_values_clear_state_and_never_generate_invalid_messages() {
+        let start = Instant::now();
+        let mut engine = AlertEngine::with_thresholds(AlertThresholds::default());
+        let mut value = metrics(0);
+        value.memory_percent = 95.0;
+        value.cpu_temp_celsius = Some(95.0);
+        value.gpu = Some(gpu(95.0));
+        tick(&mut engine, start, 0, &value);
+        value.sampled_at_ms += 1000;
+        value.cpu_percent = f32::NAN;
+        value.memory_percent = f32::INFINITY;
+        value.cpu_temp_celsius = Some(f32::NAN);
+        value.gpu = Some(gpu(f32::INFINITY));
+        value.disks = vec![DiskStat {
+            name: "bad".to_string(),
+            mount_point: "bad".to_string(),
+            total_bytes: 0,
+            available_bytes: 0,
+            used_percent: f32::NAN,
+        }];
+        let (status, pending) = tick(&mut engine, start, 1, &value);
+        assert!(!status.active);
+        assert!(pending.is_empty());
+        assert!(status.messages.is_empty());
+        for second in 2..7 {
+            assert!(tick(&mut engine, start, second, &metrics(second))
+                .1
+                .is_empty());
+        }
+        assert_eq!(tick(&mut engine, start, 7, &metrics(7)).1.len(), 1);
+    }
+
+    #[test]
+    fn changed_thresholds_restart_sustain_and_preserve_successful_cooldown() {
+        let start = Instant::now();
+        let mut thresholds = AlertThresholds::default();
+        thresholds.cooldown_secs = 10;
+        let mut engine = AlertEngine::with_thresholds(thresholds.clone());
+        for second in 0..4 {
+            tick(&mut engine, start, second, &metrics(second));
+        }
+        thresholds.cpu_percent = 94.0;
+        engine.set_thresholds(thresholds.clone());
+        for second in 4..9 {
+            assert!(tick(&mut engine, start, second, &metrics(second))
+                .1
+                .is_empty());
+        }
+        assert_eq!(tick(&mut engine, start, 9, &metrics(9)).1.len(), 1);
+        engine.mark_fired_at(&[AlertKind::Cpu], start + Duration::from_secs(9));
+        thresholds.cpu_percent = 93.0;
+        engine.set_thresholds(thresholds);
+        for second in 10..19 {
+            assert!(tick(&mut engine, start, second, &metrics(second))
+                .1
+                .is_empty());
+        }
+        assert_eq!(tick(&mut engine, start, 19, &metrics(19)).1.len(), 1);
+    }
+
+    #[test]
+    fn zero_sustain_notifies_immediately_but_only_success_marks_episode() {
+        let start = Instant::now();
+        let mut engine = AlertEngine::with_thresholds(AlertThresholds::default());
+        assert_eq!(
+            engine
+                .evaluate_at(&metrics(0), Duration::ZERO, start)
+                .1
+                .len(),
+            1
+        );
+        assert_eq!(
+            engine
+                .evaluate_at(&metrics(0), Duration::ZERO, start)
+                .1
+                .len(),
+            1
+        );
+        engine.mark_fired_at(&[AlertKind::Cpu], start);
+        assert!(engine
+            .evaluate_at(&metrics(0), Duration::ZERO, start)
+            .1
+            .is_empty());
+    }
+
+    #[test]
+    fn threshold_change_does_not_reuse_a_cached_frames_old_observation_time() {
+        let start = Instant::now();
+        let mut thresholds = AlertThresholds::default();
+        let mut engine = AlertEngine::with_thresholds(thresholds.clone());
+        tick(&mut engine, start, 0, &metrics(0));
+        thresholds.cpu_percent = 94.0;
+        engine.set_thresholds(thresholds);
+        assert!(tick(&mut engine, start, 4, &metrics(0)).1.is_empty());
+        for second in 5..9 {
+            assert!(tick(&mut engine, start, second, &metrics(second))
+                .1
+                .is_empty());
+        }
+        assert_eq!(tick(&mut engine, start, 9, &metrics(9)).1.len(), 1);
+    }
+
+    #[test]
+    fn every_metric_sustains_independently_and_invalid_disks_are_ignored() {
+        let start = Instant::now();
+        let mut engine = AlertEngine::with_thresholds(AlertThresholds::default());
+        for second in 0..=5 {
+            let mut value = metrics(second);
+            value.memory_percent = 95.0;
+            value.cpu_temp_celsius = Some(95.0);
+            value.gpu = Some(gpu(95.0));
+            value.disks = [f32::NAN, 95.0]
+                .into_iter()
+                .enumerate()
+                .map(|(index, used_percent)| DiskStat {
+                    name: index.to_string(),
+                    mount_point: index.to_string(),
+                    total_bytes: 0,
+                    available_bytes: 0,
+                    used_percent,
+                })
+                .collect();
+            let (status, pending) = tick(&mut engine, start, second, &value);
+            assert!(status.cpu && status.memory && status.temperature && status.disk && status.gpu);
+            assert!(status.messages.iter().all(|text| !text.contains("NaN")));
+            assert_eq!(pending.len(), if second == 5 { 5 } else { 0 });
+        }
+    }
+}

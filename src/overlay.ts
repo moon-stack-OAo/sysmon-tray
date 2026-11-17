@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { initializeCodex } from './codex';
+import { initializeHardware, isHardwareVisible } from './hardware';
 import './codex.css';
 import { listen } from '@tauri-apps/api/event';
 import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window';
@@ -44,6 +45,8 @@ interface Metrics {
   sampledAtMs: number;
   alert: AlertStatus;
   tempSource: string;
+  stale: boolean;
+  error: string | null;
 }
 
 type OverlayStyle = 'capsule' | 'vertical' | 'numeric';
@@ -60,6 +63,7 @@ interface AppConfig {
 type OverlayMode = 'collapsed' | 'expanded' | 'peek';
 
 let mode: OverlayMode = 'collapsed';
+let lastMetrics: Metrics | null = null;
 let style: OverlayStyle = 'capsule';
 let layoutQueue: Promise<void> = Promise.resolve();
 let layoutDepth = 0;
@@ -67,7 +71,6 @@ let autoHide = false;
 let edgeX: 'left' | 'right' | null = null;
 let hideTimer: number | undefined;
 let pinnedExpanded = false;
-let pollTimer: number | undefined;
 let overlayEnabled = true;
 let clickThroughEnabled = false;
 let ignoreActive = false;
@@ -90,20 +93,6 @@ let overlayMetrics = new Set(DEFAULT_OVERLAY_METRICS);
 const HIDE_DELAY_MS = 900;
 const CLICK_THROUGH_POLL_MS = 60;
 const CLICK_THROUGH_LEAVE_MS = 250;
-
-function startPolling() {
-  if (pollTimer !== undefined) return;
-  pollTimer = window.setInterval(() => {
-    void refreshOverlay();
-  }, 1000);
-}
-
-function stopPolling() {
-  if (pollTimer !== undefined) {
-    window.clearInterval(pollTimer);
-    pollTimer = undefined;
-  }
-}
 
 function clearClickThroughLeaveTimer() {
   if (clickThroughLeaveTimer !== undefined) {
@@ -403,7 +392,7 @@ async function applyLayout(next: OverlayMode, force = false) {
       mode = next;
       applyModeClass(mode);
       // 每秒只更新当前可见视图，切换后需立即刷新一次新视图
-      void refreshOverlay();
+      if (lastMetrics && isHardwareVisible()) refreshActiveView(lastMetrics);
     } catch (error) {
       console.error('切换叠加层布局失败', error);
       applyModeClass(mode);
@@ -698,14 +687,22 @@ function refreshActiveView(metrics: Metrics) {
   else updateVerticalStrip(metrics);
 }
 
-async function refreshOverlay() {
-  try {
-    refreshActiveView(await invoke<Metrics>('get_metrics'));
-  } catch (error) {
-    console.error('叠加层获取监测数据失败', error);
-    const updated = document.querySelector('#overlay-updated');
-    if (updated) updated.textContent = '中断';
+async function refreshOverlay(metrics: Metrics) {
+  if (!isHardwareVisible() || !overlayEnabled) return;
+  if (metrics.stale) {
+    const updated = document.querySelector<HTMLElement>('#overlay-updated');
+    if (updated) {
+      updated.textContent = '数据过期';
+      updated.title = metrics.error ?? '等待后台采样恢复';
+    }
+    document.querySelector('#overlay-root')?.classList.add('metrics-stale');
+    return;
   }
+  lastMetrics = metrics;
+  document.querySelector('#overlay-root')?.classList.remove('metrics-stale');
+  const updated = document.querySelector<HTMLElement>('#overlay-updated');
+  if (updated) updated.title = '最近成功采样时间';
+  refreshActiveView(metrics);
 }
 
 function bindWindowDrag(root: HTMLElement) {
@@ -823,27 +820,19 @@ window.addEventListener('contextmenu', (event) => {
 
 window.addEventListener('DOMContentLoaded', () => {
   initializeCodex();
+  initializeHardware<Metrics>(refreshOverlay);
   bindCollapseUi();
   applyStyleClass('capsule');
   applyModeClass('collapsed');
   mode = 'collapsed';
   // 仅按最终配置 resize 一次；窗口初始尺寸即 collapsed capsule 尺寸，配置加载失败也无需回退
-  void loadOverlayConfig().then(() => {
-    // 后端仅在 overlay_enabled 时才显示窗口；禁用时 webview 虽存活，但不应驱动每秒采样
-    if (overlayEnabled) {
-      void refreshOverlay();
-      startPolling();
-    }
-  });
+  void loadOverlayConfig();
 
   void listen<boolean>('overlay-enabled-changed', (event) => {
     overlayEnabled = !!event.payload;
     if (overlayEnabled) {
-      startPolling();
-      void refreshOverlay();
       void syncClickThroughRuntime();
     } else {
-      stopPolling();
       void disableClickThroughRuntime();
     }
   });

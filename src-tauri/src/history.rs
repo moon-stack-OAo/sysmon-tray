@@ -12,6 +12,7 @@ pub const ALLOWED_HISTORY_RANGE_MINUTES: &[u32] = &[1, 5, 15, 60];
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryPoint {
+    pub sequence: u64,
     pub cpu_percent: f32,
     pub memory_percent: f32,
     pub cpu_temp_celsius: Option<f32>,
@@ -24,7 +25,18 @@ pub struct HistoryPoint {
     pub timestamp_ms: u128,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryBatch {
+    pub points: Vec<HistoryPoint>,
+    pub cursor: u64,
+    pub oldest: u64,
+    pub capacity: usize,
+    pub reset: bool,
+}
+
 pub struct MetricsHistory {
+    sequence: u64,
     capacity: usize,
     points: VecDeque<HistoryPoint>,
 }
@@ -34,6 +46,7 @@ impl MetricsHistory {
         let capacity = capacity.max(1);
         Self {
             capacity,
+            sequence: 0,
             points: VecDeque::with_capacity(capacity),
         }
     }
@@ -47,7 +60,8 @@ impl MetricsHistory {
         }
         // 扩容时预留空间，避免频繁重分配
         if self.points.capacity() < self.capacity {
-            self.points.reserve(self.capacity - self.points.capacity());
+            self.points
+                .reserve(self.capacity.saturating_sub(self.points.len()));
         }
     }
 
@@ -55,9 +69,11 @@ impl MetricsHistory {
         if self.points.len() >= self.capacity {
             self.points.pop_front();
         }
+        self.sequence += 1;
         let primary = pick_primary_fan(&metrics.fans);
         let gpu = metrics.gpu.as_ref();
         self.points.push_back(HistoryPoint {
+            sequence: self.sequence,
             cpu_percent: metrics.cpu_percent,
             memory_percent: metrics.memory_percent,
             cpu_temp_celsius: metrics.cpu_temp_celsius,
@@ -69,6 +85,27 @@ impl MetricsHistory {
             net_up_bps: metrics.net_up_bps,
             timestamp_ms: metrics.sampled_at_ms,
         });
+    }
+
+    pub fn batch(&self, cursor: Option<u64>) -> HistoryBatch {
+        let oldest = self
+            .points
+            .front()
+            .map(|p| p.sequence)
+            .unwrap_or(self.sequence + 1);
+        let reset = cursor.is_none_or(|c| c > self.sequence || c.saturating_add(1) < oldest);
+        HistoryBatch {
+            points: self
+                .points
+                .iter()
+                .filter(|p| reset || cursor.is_none_or(|c| p.sequence > c))
+                .cloned()
+                .collect(),
+            cursor: self.sequence,
+            oldest,
+            capacity: self.capacity,
+            reset,
+        }
     }
 
     pub fn snapshot(&self) -> Vec<HistoryPoint> {
@@ -156,14 +193,67 @@ mod tests {
     #[test]
     fn pick_primary_prefers_cpu_then_pump_gpu_chassis() {
         let fans = vec![fan("chassis", 800), fan("gpu", 1200), fan("pump", 2000)];
-        assert_eq!(pick_primary_fan(&fans).map(|f| f.kind.as_str()), Some("pump"));
+        assert_eq!(
+            pick_primary_fan(&fans).map(|f| f.kind.as_str()),
+            Some("pump")
+        );
 
         let fans = vec![fan("chassis", 800), fan("cpu", 1500), fan("gpu", 1200)];
-        assert_eq!(pick_primary_fan(&fans).map(|f| f.kind.as_str()), Some("cpu"));
+        assert_eq!(
+            pick_primary_fan(&fans).map(|f| f.kind.as_str()),
+            Some("cpu")
+        );
 
         let fans = vec![fan("other", 500)];
         assert_eq!(pick_primary_fan(&fans).map(|f| f.rpm), Some(500));
 
         assert!(pick_primary_fan(&[]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    fn push(history: &mut MetricsHistory, timestamp: u128) {
+        history.push_from_metrics(&crate::monitor::Metrics {
+            cpu_percent: 5.0,
+            memory_percent: 6.0,
+            memory_used_bytes: 0,
+            memory_total_bytes: 0,
+            swap_used_bytes: 0,
+            swap_total_bytes: 0,
+            net_down_bps: 0,
+            net_up_bps: 0,
+            net_interface: None,
+            net_link: "down".into(),
+            disks: Vec::new(),
+            cpu_temp_celsius: None,
+            gpu: None,
+            fans: Vec::new(),
+            sampled_at_ms: timestamp,
+        });
+    }
+    #[test]
+    fn cursors_do_not_depend_on_wall_clock_and_expired_clients_reset() {
+        let mut history = MetricsHistory::new(2);
+        assert!(history.batch(None).reset);
+        push(&mut history, 1000);
+        push(&mut history, 500);
+        let initial = history.batch(None);
+        assert_eq!(initial.cursor, 2);
+        assert_eq!(initial.points.len(), 2);
+        assert!(history.batch(Some(2)).points.is_empty());
+        push(&mut history, 500);
+        let delta = history.batch(Some(2));
+        assert!(!delta.reset);
+        assert_eq!(delta.points[0].sequence, 3);
+        assert!(history.batch(Some(0)).reset);
+        assert!(history.batch(Some(99)).reset);
+        history.set_capacity(1);
+        assert_eq!(history.batch(Some(2)).oldest, 3);
+        history.set_capacity(60);
+        push(&mut history, 400);
+        assert_eq!(history.batch(Some(3)).points.len(), 1);
+        assert_eq!(history_to_csv(&history.snapshot()).lines().count(), 3);
     }
 }

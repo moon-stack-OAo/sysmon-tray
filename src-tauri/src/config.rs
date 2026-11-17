@@ -1,4 +1,5 @@
 use crate::alert::AlertThresholds;
+use crate::network::NetworkSelection;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -214,6 +215,8 @@ pub enum OverlayEdgeY {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
+    #[serde(default)]
+    pub network_selection: NetworkSelection,
     pub alert: AlertThresholds,
     /// 是否启用系统通知
     #[serde(default = "default_notification_enabled")]
@@ -295,6 +298,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             alert: AlertThresholds::default(),
+            network_selection: NetworkSelection::default(),
             notification_enabled: default_notification_enabled(),
             history_range_minutes: default_history_range_minutes(),
             precise_temp_enabled: default_precise_temp_enabled(),
@@ -365,6 +369,7 @@ impl AppConfig {
         let raw = fs::read_to_string(path).map_err(|e| format!("读取配置失败: {e}"))?;
         let mut cfg: Self =
             serde_json::from_str(&raw).map_err(|e| format!("解析配置失败: {e}"))?;
+        if cfg.network_selection.validate().is_err() { cfg.network_selection = NetworkSelection::default(); }
         cfg.history_range_minutes =
             crate::history::normalize_history_range_minutes(cfg.history_range_minutes);
         cfg.lhm_base_url = normalize_lhm_base_url(&cfg.lhm_base_url)
@@ -693,5 +698,16 @@ mod tests {
         assert_eq!(*shared.lock().unwrap(), before);
         assert!(!path.exists());
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn old_config_defaults_network_selection_and_selection_round_trips() {
+        let mut old = serde_json::to_value(AppConfig::default()).unwrap();
+        old.as_object_mut().unwrap().remove("networkSelection");
+        let cfg: AppConfig = serde_json::from_value(old).unwrap();
+        assert_eq!(cfg.network_selection, NetworkSelection::Auto);
+        let cfg = AppConfig { network_selection: NetworkSelection::Interface("Wi-Fi".to_string()), ..cfg };
+        let restored: AppConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(restored.network_selection, NetworkSelection::Interface("Wi-Fi".to_string()));
     }
 }

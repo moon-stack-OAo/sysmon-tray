@@ -997,3 +997,14 @@ body {
 .chart-readings .gpu[hidden] {
   display: none;
 }
+
+#diagnostics-output {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.6;
+}
+#monitor-diagnostics summary {
+  cursor: pointer;
+}

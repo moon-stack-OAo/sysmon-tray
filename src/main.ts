@@ -1,5 +1,14 @@
+import { initializeDiagnostics } from './diagnostics';
+import {
+  chartPoints,
+  chartX,
+  mergeHistory,
+  type HistoryPoint,
+  type HistoryBatch,
+} from './history-chart';
 import { getVersion } from '@tauri-apps/api/app';
 import { initializeCodex } from './codex';
+import { initializeHardware, isHardwareVisible, hardwareRevision } from './hardware';
 import './codex.css';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -22,7 +31,10 @@ interface AlertThresholds {
   cooldownSecs: number;
 }
 
+type NetworkSelection = { mode: 'auto' | 'all' } | { mode: 'interface'; interface: string };
+
 interface AppConfig {
+  networkSelection: NetworkSelection;
   alert: AlertThresholds;
   notificationEnabled: boolean;
   historyRangeMinutes: number;
@@ -114,19 +126,8 @@ interface Metrics {
   sampledAtMs: number;
   alert: AlertStatus;
   tempSource: string;
-}
-
-interface HistoryPoint {
-  cpuPercent: number;
-  memoryPercent: number;
-  cpuTempCelsius: number | null;
-  gpuLoadPercent: number | null;
-  gpuTempCelsius: number | null;
-  fanRpm: number | null;
-  fanName: string | null;
-  netDownBps: number;
-  netUpBps: number;
-  timestampMs: number;
+  stale: boolean;
+  error: string | null;
 }
 
 type TabId = 'monitor' | 'settings';
@@ -318,6 +319,8 @@ function setProcessTopVisible(enabled: boolean) {
 }
 
 async function refreshProcessTop(force = false) {
+  if (!isHardwareVisible()) return;
+  const revision = hardwareRevision();
   const card = document.querySelector('#process-top-card') as HTMLElement | null;
   if (!processTopEnabled) {
     setProcessTopVisible(false);
@@ -332,6 +335,7 @@ async function refreshProcessTop(force = false) {
 
   try {
     const snap = await invoke<ProcessTopSnapshot>('get_process_top');
+    if (!isHardwareVisible() || revision !== hardwareRevision()) return;
     lastProcessTopFetchAt = now;
     processTopEnabled = snap.enabled;
     setProcessTopVisible(snap.enabled);
@@ -356,21 +360,6 @@ function updateChartHint(minutes: number) {
   if (hint) {
     hint.textContent = `最近约 ${normalizeHistoryRangeMinutes(minutes)} 分钟`;
   }
-}
-
-/** 点数过多时按 stride 抽样绘制，数据本身仍全保留 */
-function downsampleForDraw(points: HistoryPoint[], maxPoints = 600): HistoryPoint[] {
-  if (points.length <= maxPoints) return points;
-  const stride = Math.ceil(points.length / maxPoints);
-  const sampled: HistoryPoint[] = [];
-  for (let i = 0; i < points.length; i += stride) {
-    sampled.push(points[i]);
-  }
-  const last = points[points.length - 1];
-  if (sampled[sampled.length - 1] !== last) {
-    sampled.push(last);
-  }
-  return sampled;
 }
 
 function hexToRgba(hex: string, alpha: number): string {
@@ -463,7 +452,9 @@ function drawHistoryChart(points: HistoryPoint[]) {
     ctx.stroke();
   }
 
-  const drawPoints = downsampleForDraw(points);
+  const endTime = Date.now();
+  const rangeMs = historyRangeMinutes * 60000;
+  const drawPoints = chartPoints(points, endTime, rangeMs, cssWidth);
   if (drawPoints.length < 2) {
     ctx.fillStyle = '#9c9c9d';
     ctx.font = '12px Inter, Segoe UI, Microsoft YaHei, sans-serif';
@@ -479,8 +470,7 @@ function drawHistoryChart(points: HistoryPoint[]) {
   const padY = 4;
   const plotW = cssWidth - padX * 2;
   const plotH = cssHeight - padY * 2;
-  const n = drawPoints.length;
-  const stepX = plotW / Math.max(n - 1, 1);
+  const xAt = (i: number) => padX + chartX(drawPoints[i].timestampMs, endTime, rangeMs, plotW);
 
   const hasGpu = drawPoints.some((p) => p.gpuLoadPercent != null);
   const hasTemp = drawPoints.some((p) => p.cpuTempCelsius != null);
@@ -527,14 +517,14 @@ function drawHistoryChart(points: HistoryPoint[]) {
     let current: Array<{ x: number; y: number }> = [];
     for (let i = 0; i < values.length; i++) {
       const v = values[i];
-      if (v == null) {
+      if (v == null || !Number.isFinite(v) || drawPoints[i].breakBefore) {
         if (current.length) {
           segments.push(current);
           current = [];
         }
-        continue;
+        if (v == null || !Number.isFinite(v)) continue;
       }
-      current.push({ x: padX + i * stepX, y: mapY(v) });
+      current.push({ x: xAt(i), y: mapY(v) });
     }
     if (current.length) segments.push(current);
 
@@ -569,7 +559,7 @@ function drawHistoryChart(points: HistoryPoint[]) {
     for (let i = values.length - 1; i >= 0; i--) {
       const v = values[i];
       if (v == null) continue;
-      const x = padX + i * stepX;
+      const x = xAt(i);
       const y = mapY(v);
       ctx.beginPath();
       ctx.arc(x, y, 2.5, 0, Math.PI * 2);
@@ -614,19 +604,44 @@ function drawHistoryChart(points: HistoryPoint[]) {
   updateChartReadings(drawPoints[drawPoints.length - 1] ?? null, hasTemp, hasFan, hasGpu);
 }
 
+let historyPoints: HistoryPoint[] = [];
+let historyCursor: number | null = null;
+let historyBusy = false;
 async function refreshHistoryChart() {
+  if (!isHardwareVisible() || currentTab !== 'monitor' || historyBusy) return;
+  const revision = hardwareRevision();
+  historyBusy = true;
   try {
-    // get_metrics 已写入历史，再拉取快照绘制
-    const history = await invoke<HistoryPoint[]>('get_metrics_history');
-    drawHistoryChart(history);
+    const batch = await invoke<HistoryBatch>('get_metrics_history_batch', {
+      cursor: historyCursor,
+    });
+    if (!isHardwareVisible() || revision !== hardwareRevision() || currentTab !== 'monitor') return;
+    const changed =
+      batch.reset ||
+      batch.points.length > 0 ||
+      historyPoints.some((p) => p.sequence < batch.oldest) ||
+      historyPoints.length > batch.capacity;
+    historyPoints = mergeHistory(historyPoints, batch);
+    historyCursor = batch.cursor;
+    if (changed) drawHistoryChart(historyPoints);
   } catch (error) {
-    console.error('获取监测数据失败', error);
+    console.error('获取历史增量失败', error);
+  } finally {
+    historyBusy = false;
   }
 }
 
-async function refreshMetrics() {
+async function refreshMetrics(metrics: Metrics) {
+  if (!isHardwareVisible()) return;
   try {
-    const metrics = await invoke<Metrics>('get_metrics');
+    if (metrics.stale) {
+      const updated = document.querySelector<HTMLElement>('#updated-at');
+      if (updated) {
+        updated.textContent = '数据过期';
+        updated.title = metrics.error ?? '等待后台采样恢复';
+      }
+      return;
+    }
     const alert = metrics.alert;
 
     const cpuValue = document.querySelector('#cpu-value');
@@ -731,7 +746,9 @@ async function refreshMetrics() {
     const netInterface = document.querySelector('#net-interface');
     if (netInterface) {
       if (metrics.netLink === 'down') {
-        netInterface.textContent = '未检测到网卡';
+        netInterface.textContent = metrics.netInterface
+          ? `${metrics.netInterface} · 当前不可用`
+          : '未检测到网卡';
       } else if (metrics.netInterface) {
         netInterface.textContent = metrics.netInterface;
       } else {
@@ -755,6 +772,7 @@ async function refreshMetrics() {
     if (updatedAt) {
       const date = new Date(Number(metrics.sampledAtMs));
       updatedAt.textContent = date.toLocaleTimeString();
+      (updatedAt as HTMLElement).title = '最近成功采样时间';
     }
 
     if (alertBanner) {
@@ -1114,6 +1132,7 @@ function readSettingsForm(): AlertThresholds | null {
 }
 
 interface AppliedSettings {
+  networkSelection: NetworkSelection;
   alert: AlertThresholds;
   notificationEnabled: boolean;
   historyRangeMinutes: number;
@@ -1163,6 +1182,7 @@ async function loadSettingsForm() {
     overlayMetrics: cfg.overlayMetrics,
   });
   updateChartHint(historyRangeMinutes);
+  await loadNetworkInterfaces(cfg.networkSelection);
   await refreshTempSourceStatus();
 }
 
@@ -1193,9 +1213,42 @@ function fillSettingsFormFromApplied(applied: AppliedSettings) {
     hotkeyClickThrough: applied.hotkeyClickThrough,
     overlayMetrics: applied.overlayMetrics,
   });
+  void loadNetworkInterfaces(applied.networkSelection);
   if (processTopEnabled) {
     void refreshProcessTop(true);
   }
+}
+
+async function loadNetworkInterfaces(selection: NetworkSelection) {
+  const select = document.querySelector<HTMLSelectElement>('#setting-network-interface');
+  if (!select) return;
+  const interfaces =
+    await invoke<Array<{ name: string; virtualInterface: boolean }>>('get_network_interfaces');
+  const options = [
+    new Option('自动选择单一网卡', 'auto'),
+    new Option('全部接口汇总（可能重复统计）', 'all'),
+  ];
+  interfaces.forEach((item) =>
+    options.push(
+      new Option(item.name + (item.virtualInterface ? '（虚拟）' : ''), 'interface:' + item.name),
+    ),
+  );
+  const selected =
+    selection.mode === 'interface' ? 'interface:' + selection.interface : selection.mode;
+  if (!options.some((option) => option.value === selected))
+    options.push(
+      new Option((selection as { interface: string }).interface + '（当前不可用）', selected),
+    );
+  select.replaceChildren(...options);
+  select.value = selected;
+}
+
+function readNetworkSelection(): NetworkSelection {
+  const value =
+    document.querySelector<HTMLSelectElement>('#setting-network-interface')?.value ?? 'auto';
+  return value.startsWith('interface:')
+    ? { mode: 'interface', interface: value.slice(10) }
+    : { mode: value === 'all' ? 'all' : 'auto' };
 }
 
 async function setSettingsOpen(open: boolean) {
@@ -1313,6 +1366,7 @@ function bindSettingsUi() {
       const applied = await invoke<AppliedSettings>('apply_settings', {
         settings: {
           thresholds,
+          networkSelection: readNetworkSelection(),
           notificationEnabled: readNotificationEnabled(),
           historyRangeMinutes: readHistoryRangeMinutes(),
           preciseTempEnabled: readPreciseTempEnabled(),
@@ -1437,13 +1491,12 @@ async function showAppVersion() {
 
 window.addEventListener('DOMContentLoaded', () => {
   initializeCodex();
+  initializeDiagnostics();
   void showAppVersion();
   bindSettingsUi();
   void bootstrapHistoryHint();
   void ensureFrontendNotificationPermission();
-  refreshMetrics();
-  // 主面板隐藏时继续轮询是告警链路所依赖的（前端采样驱动后端告警评估与通知），勿改为失焦暂停
-  window.setInterval(refreshMetrics, 1000);
+  initializeHardware<Metrics>(refreshMetrics);
 
   void listen('open-settings', () => {
     void switchTab('settings');

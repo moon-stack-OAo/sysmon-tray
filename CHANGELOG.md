@@ -6,13 +6,27 @@
 
 ## [Unreleased]
 
+## [0.1.7]
+
 ### 新增
 
+- 独立 Rust 后台采样与共享只读快照，告警和历史不再依赖窗口轮询；隐藏窗口停止硬件界面刷新。
+- 网速支持自动单网卡、指定接口与全部汇总，并为每个接口独立维护差分基线。
+- 设置新增按需展开的监测诊断，普通提交与 PR 新增前后端 Checks。
 - 叠加层三种收起样式显示 Codex 额度的紧凑重置倒计时（如 `33m`、`1d 1h 1m`），悬停可查看完整本地重置时间。
 - 托盘菜单直接同步 Codex 额度，显示同步状态及上次同步时间，关闭监测时禁用。
 
+### 变更
+
+- 历史曲线改为序号增量同步、真实时间轴与保留极值的时间桶绘制，断采/休眠/时钟回退不跨线。
+- Codex 前端改为事件驱动，隐藏窗口暂停缓存查询和倒计时，显示时立即恢复。
+- CPU 首次基线与预热等待移至后台，首个有效样本后才评估告警。
+- 温度、磁盘容量与磁盘发现分层降频，进程及历史读取离开 UI 线程。
+
 ### 修复
 
+- 系统告警在持续超限后正常触发，发送失败或静音后可重试；尖峰、采样断档和重复帧不会误累计持续时间。
+- 后台采样错误保留旧值并标记过期。
 - 竖条叠加层将 Codex 重置倒计时放在额度上方，恢复 76px 宽度，减少右侧留白。
 - Codex 查询短暂失败后自动重连并重试，持续失败的重试等待缩短至 15–120 秒，避免长期停留在灰色状态。
 - 同步失败时显示自动重试倒计时，并在悬停提示中保留失败原因和最近数据时间。
@@ -143,7 +157,9 @@
 - NSIS 安装界面支持中英双语选择
 - Release 资源英文命名：`sysmon-tray-setup.exe`、`sysmon-tray-portable.exe`
 
-[Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.6...v0.1.7
+[0.1.6]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.2...v0.1.3

@@ -3,6 +3,8 @@ mod config;
 mod codex;
 mod history;
 mod monitor;
+mod network;
+mod sampling;
 mod temperature;
 mod temperature_lhm;
 
@@ -14,11 +16,13 @@ use config::{
 };
 use history::{history_capacity_for_minutes, history_to_csv, HistoryPoint};
 use monitor::{
-    sample_cached_shared, sample_process_top_shared, Metrics, MonitorState, ProcessTopSnapshot,
+    sample_process_top_shared, Metrics, MonitorState, ProcessTopSnapshot,
     SharedMonitor,
-    SharedTemperature, METRICS_CACHE_MIN_INTERVAL,
+    SharedTemperature,
 };
 use chrono::Timelike;
+use network::{NetworkInterface, NetworkSelection};
+use sampling::{MonitorDiagnostics, Sampler, SharedSampler};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -73,6 +77,8 @@ struct MetricsResponse {
     alert: AlertStatus,
     /// 本次采样温度来源：`lhm` | `wmi` | `sysinfo` | `unavailable`
     temp_source: String,
+    stale: bool,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -187,61 +193,23 @@ fn temp_source_message(
 }
 
 #[tauri::command]
-fn get_metrics(
-    app: tauri::AppHandle,
-    monitor: tauri::State<'_, SharedMonitor>,
-    temperature: tauri::State<'_, SharedTemperature>,
-    lhm_extras: tauri::State<'_, SharedLhmExtras>,
-    alerts: tauri::State<'_, SharedAlerts>,
-    config: tauri::State<'_, SharedConfig>,
-    tracker: tauri::State<'_, SharedTempTracker>,
-) -> Result<MetricsResponse, String> {
-    // 主面板与叠加层共用短时缓存，避免双采样打乱网速差分；温度 IO 在 monitor 锁外进行
-    let metrics = sample_cached_shared(
-        &monitor,
-        &temperature,
-        &lhm_extras,
-        METRICS_CACHE_MIN_INTERVAL,
-    )?;
+fn get_metrics(sampler: tauri::State<'_, SharedSampler>) -> Result<MetricsResponse, String> {
+    sampler.snapshot()
+}
 
-    let temp_source = tracker.get().as_str().to_string();
+#[tauri::command]
+fn get_monitor_diagnostics(sampler: tauri::State<'_, SharedSampler>) -> Result<MonitorDiagnostics, String> {
+    sampler.diagnostics()
+}
 
-    let (notification_enabled, sustain_secs, quiet) = {
-        let cfg = config.lock().map_err(|e| e.to_string())?;
-        (
-            cfg.notification_enabled,
-            cfg.alert_sustain_secs,
-            quiet_hours_active(&cfg),
-        )
-    };
+#[tauri::command]
+async fn get_network_interfaces(app: AppHandle) -> Result<Vec<NetworkInterface>, String> {
+    tauri::async_runtime::spawn_blocking(move || Ok(app.state::<SharedMonitor>().lock().map_err(|e| e.to_string())?.network_interfaces())).await.map_err(|e| e.to_string())?
+}
 
-    let (mut alert, newly_fired) = {
-        let mut engine = alerts.lock().map_err(|e| e.to_string())?;
-        engine.evaluate(&metrics, Duration::from_secs(sustain_secs))
-    };
-
-    // 安静时段仍保留横幅/tooltip，但不发通知、不记账，时段结束后下一次仍能响
-    if notification_enabled && !quiet && send_alert_notification(&app, &newly_fired) {
-        let kinds: Vec<AlertKind> = newly_fired.iter().map(|(kind, _)| *kind).collect();
-        let mut engine = alerts.lock().map_err(|e| e.to_string())?;
-        engine.mark_fired(&kinds);
-    }
-
-    let codex_messages = codex::low_messages(&app.state::<SharedCodex>().snapshot());
-    if !codex_messages.is_empty() {
-        alert.active = true;
-        alert.messages.extend(codex_messages);
-    }
-    if let Some(tray) = app.tray_by_id("main") {
-        let _ = tray.set_tooltip(Some(alert.tooltip_text()));
-        sync_tray_alert_icon(&app, &tray, alert.active);
-    }
-
-    Ok(MetricsResponse {
-        metrics,
-        alert,
-        temp_source,
-    })
+#[tauri::command]
+fn get_window_visibility(window: tauri::WebviewWindow) -> Result<bool, String> {
+    window.is_visible().map_err(|e| e.to_string())
 }
 
 fn local_minute_of_day() -> u16 {
@@ -341,29 +309,29 @@ fn sync_tray_alert_icon(app: &tauri::AppHandle, tray: &tauri::tray::TrayIcon<tau
 }
 
 #[tauri::command]
-fn export_metrics_csv(monitor: tauri::State<'_, SharedMonitor>) -> Result<String, String> {
-    let monitor = monitor.lock().map_err(|e| e.to_string())?;
-    Ok(history_to_csv(&monitor.history_snapshot()))
+async fn export_metrics_csv(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let points = app.state::<SharedMonitor>().lock().map_err(|e| e.to_string())?.history_snapshot();
+        Ok(history_to_csv(&points))
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn get_metrics_history(
-    monitor: tauri::State<'_, SharedMonitor>,
-) -> Result<Vec<HistoryPoint>, String> {
-    let monitor = monitor.lock().map_err(|e| e.to_string())?;
-    Ok(monitor.history_snapshot())
+async fn get_metrics_history(app: AppHandle) -> Result<Vec<HistoryPoint>, String> {
+    tauri::async_runtime::spawn_blocking(move || Ok(app.state::<SharedMonitor>().lock().map_err(|e| e.to_string())?.history_snapshot())).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn get_process_top(
-    monitor: tauri::State<'_, SharedMonitor>,
-    config: tauri::State<'_, SharedConfig>,
-) -> Result<ProcessTopSnapshot, String> {
-    let enabled = {
-        let cfg = config.lock().map_err(|e| e.to_string())?;
-        cfg.process_top_enabled
-    };
-    sample_process_top_shared(&monitor, enabled)
+async fn get_metrics_history_batch(app: AppHandle, cursor: Option<u64>) -> Result<history::HistoryBatch, String> {
+    tauri::async_runtime::spawn_blocking(move || Ok(app.state::<SharedMonitor>().lock().map_err(|e| e.to_string())?.history_batch(cursor))).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_process_top(app: AppHandle) -> Result<ProcessTopSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let enabled = app.state::<SharedConfig>().lock().map_err(|e| e.to_string())?.process_top_enabled;
+        sample_process_top_shared(&app.state::<SharedMonitor>(), enabled)
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -453,25 +421,13 @@ fn set_notification_enabled(
 }
 
 #[tauri::command]
-fn set_history_range_minutes(
-    minutes: u32,
-    monitor: tauri::State<'_, SharedMonitor>,
-    config: tauri::State<'_, SharedConfig>,
-) -> Result<u32, String> {
-    let capacity = history_capacity_for_minutes(minutes)?;
-
-    mutate_config(&config, |next| {
-        next.history_range_minutes = minutes;
-        Ok(())
-    })?;
-
-    // 历史容量与配置分时加锁，提交成功后再调整内存容量
-    {
-        let mut monitor = monitor.lock().map_err(|e| e.to_string())?;
-        monitor.set_history_capacity(capacity);
-    }
-
-    Ok(minutes)
+async fn set_history_range_minutes(minutes: u32, app: AppHandle) -> Result<u32, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let capacity = history_capacity_for_minutes(minutes)?;
+        mutate_config(&app.state::<SharedConfig>(), |next| { next.history_range_minutes = minutes; Ok(()) })?;
+        app.state::<SharedMonitor>().lock().map_err(|e| e.to_string())?.set_history_capacity(capacity);
+        Ok(minutes)
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -506,6 +462,8 @@ fn set_lhm_base_url(
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SettingsInput {
+    #[serde(default)]
+    network_selection: NetworkSelection,
     thresholds: AlertThresholds,
     notification_enabled: bool,
     history_range_minutes: u32,
@@ -533,6 +491,7 @@ impl SettingsInput {
         let cfg = AppConfig::default();
         Self {
             thresholds: AlertThresholds::default(),
+            network_selection: NetworkSelection::default(),
             notification_enabled: true,
             history_range_minutes: 1,
             precise_temp_enabled: false,
@@ -559,6 +518,7 @@ impl SettingsInput {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SettingsResponse {
+    network_selection: NetworkSelection,
     alert: AlertThresholds,
     notification_enabled: bool,
     history_range_minutes: u32,
@@ -591,6 +551,7 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
     // 校验前置：最易失败的操作先做，任一失败即中止且无副作用
     let normalized_lhm = normalize_lhm_base_url(&input.lhm_base_url)?;
     input.thresholds.validate()?;
+    input.network_selection.validate()?;
     let capacity = history_capacity_for_minutes(input.history_range_minutes)?;
     let parsed_style =
         OverlayStyle::parse(&input.overlay_style).ok_or_else(|| "无效的叠加层形态".to_string())?;
@@ -621,6 +582,7 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
     // 副本事务：唯一一次落盘，失败则内存与磁盘保持原状
     mutate_config(&config, |next| {
         next.alert = input.thresholds.clone();
+        next.network_selection = input.network_selection.clone();
         next.notification_enabled = input.notification_enabled;
         next.history_range_minutes = input.history_range_minutes;
         next.precise_temp_enabled = input.precise_temp_enabled;
@@ -698,6 +660,7 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
 
     Ok(SettingsResponse {
         alert: input.thresholds,
+        network_selection: input.network_selection,
         notification_enabled: input.notification_enabled,
         history_range_minutes: input.history_range_minutes,
         precise_temp_enabled: input.precise_temp_enabled,
@@ -721,13 +684,13 @@ fn apply_settings_impl(app: &AppHandle, input: SettingsInput) -> Result<Settings
 }
 
 #[tauri::command]
-fn apply_settings(settings: SettingsInput, app: AppHandle) -> Result<SettingsResponse, String> {
-    apply_settings_impl(&app, settings)
+async fn apply_settings(settings: SettingsInput, app: AppHandle) -> Result<SettingsResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || apply_settings_impl(&app, settings)).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn apply_settings_reset(app: AppHandle) -> Result<SettingsResponse, String> {
-    apply_settings_impl(&app, SettingsInput::defaults())
+async fn apply_settings_reset(app: AppHandle) -> Result<SettingsResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || apply_settings_impl(&app, SettingsInput::defaults())).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1393,6 +1356,7 @@ fn show_overlay_window(app: &AppHandle) {
             restore_overlay_position(&window, &cfg);
         }
         let _ = window.show();
+        let _ = window.emit("window-visibility-changed", window.is_visible().unwrap_or(false));
         clear_overlay_effects(&window);
     }
 }
@@ -1411,6 +1375,7 @@ fn hide_overlay_window(app: &AppHandle, persist_position: bool) {
             }
         }
         let _ = window.hide();
+        let _ = window.emit("window-visibility-changed", window.is_visible().unwrap_or(false));
     }
 }
 
@@ -1660,6 +1625,7 @@ fn show_panel(app: &tauri::AppHandle, tray_rect: Option<(PhysicalPosition<i32>, 
         }
 
         let _ = window.show();
+        let _ = window.emit("window-visibility-changed", window.is_visible().unwrap_or(false));
         apply_panel_effects(&window);
         let _ = window.set_focus();
     }
@@ -1671,6 +1637,7 @@ fn hide_panel(app: &tauri::AppHandle) {
             persist_main_position(app, pos.x, pos.y);
         }
         let _ = window.hide();
+        let _ = window.emit("window-visibility-changed", window.is_visible().unwrap_or(false));
     }
 }
 
@@ -1800,11 +1767,16 @@ pub fn run() {
         .manage(temp_tracker as SharedTempTracker)
         .manage(lhm_extras)
         .manage(codex_monitor)
+        .manage(Arc::new(Sampler::default()) as SharedSampler)
         .invoke_handler(tauri::generate_handler![
             get_metrics,
+            get_monitor_diagnostics,
+            get_network_interfaces,
+            get_window_visibility,
             get_codex_quota,
             refresh_codex_quota,
             get_metrics_history,
+            get_metrics_history_batch,
             export_metrics_csv,
             get_process_top,
             set_process_top_enabled,
@@ -1939,6 +1911,7 @@ pub fn run() {
                                 persist_main_position(&app_handle, pos.x, pos.y);
                             }
                             let _ = panel.hide();
+                        let _ = panel.emit("window-visibility-changed", panel.is_visible().unwrap_or(false));
                         }
                     }
                     WindowEvent::Moved(_) => {
@@ -1950,6 +1923,7 @@ pub fn run() {
                             persist_main_position(&app_handle, pos.x, pos.y);
                         }
                         let _ = panel.hide();
+                        let _ = panel.emit("window-visibility-changed", panel.is_visible().unwrap_or(false));
                     }
                     _ => {}
                 });
@@ -1965,6 +1939,7 @@ pub fn run() {
                         if let Err(err) = apply_overlay_enabled(&app_handle, false) {
                             eprintln!("关闭叠加层失败: {err}");
                             let _ = overlay.hide();
+                            let _ = overlay.emit("window-visibility-changed", overlay.is_visible().unwrap_or(false));
                         }
                     }
                     // 失焦不隐藏（与主面板不同）
@@ -1979,6 +1954,7 @@ pub fn run() {
                 }
             }
 
+            sampling::start(app.handle().clone(), Arc::clone(&app.state::<SharedSampler>()))?;
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -1989,6 +1965,7 @@ pub fn run() {
                 if code.is_none() {
                     api.prevent_exit();
                 } else {
+                    app_handle.state::<SharedSampler>().stop();
                     app_handle.state::<SharedCodex>().shutdown();
                     if let Some(window) = app_handle.get_webview_window("main") {
                         if let Ok(pos) = window.outer_position() {

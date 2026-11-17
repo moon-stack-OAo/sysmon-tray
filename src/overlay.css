@@ -267,6 +267,10 @@ body {
   color: var(--text-danger);
 }
 
+.metrics-stale [data-metric]:not([data-metric^='codex_']) {
+  opacity: 0.5;
+}
+
 .v-k {
   color: var(--meta);
   font-size: 10px;
