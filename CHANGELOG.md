@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+## [0.1.8]
+
+### 修复
+
+- 胶囊和数值条按显示项调整收起宽度，避免高占用率和双向网速挤压相邻指标或遮住展开按钮。
+- 竖条保持 76px 宽，为 GPU 多行读数预留高度，确保底部网速和周额度完整显示。
+- Codex 额度过期时仅弱化旧百分比和进度条，保持倒计时、标签和同步状态清晰。
+- 叠加层窗口过大时限制在屏幕工作区内，避免调整位置时出错。
+
 ## [0.1.7]
 
 ### 新增
@@ -159,7 +168,8 @@
 - NSIS 安装界面支持中英双语选择
 - Release 资源英文命名：`sysmon-tray-setup.exe`、`sysmon-tray-portable.exe`
 
-[Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/moon-stack-OAo/sysmon-tray/compare/v0.1.4...v0.1.5

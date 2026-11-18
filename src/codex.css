@@ -59,8 +59,9 @@
   color: var(--muted);
   margin-top: 4px;
 }
-.quota-stale {
-  opacity: 0.6;
+.quota-stale .quota-value,
+.quota-stale [data-codex-value] {
+  color: var(--muted);
 }
 .quota-stale .quota-fill {
   background: var(--muted);
@@ -114,9 +115,13 @@
 .quota-refresh:focus-visible {
   outline: 2px solid var(--accent);
 }
+.strip [data-metric^='codex_'] .strip-k,
+.vertical-strip [data-metric^='codex_'] .v-k,
+.numeric-strip [data-codex-short] {
+  color: var(--muted);
+}
 .numeric-strip [data-codex-short] {
   font-size: 9px;
-  color: var(--meta);
   margin-right: 2px;
 }
 

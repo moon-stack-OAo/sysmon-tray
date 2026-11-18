@@ -58,11 +58,8 @@ const OVERLAY_SNAP_CORNER_BONUS_PX: i32 = 12;
 const OVERLAY_SNAP_DEBOUNCE_MS: u64 = 220;
 const OVERLAY_LAYOUT_QUIET_MS: u64 = 500;
 const MAIN_POS_SAVE_DEBOUNCE_MS: u64 = 250;
-const OVERLAY_COLLAPSED_WIDTH: u32 = 378;
 const OVERLAY_COLLAPSED_HEIGHT: u32 = 38;
 const OVERLAY_VERTICAL_WIDTH: u32 = 76;
-const OVERLAY_VERTICAL_HEIGHT: u32 = 200;
-const OVERLAY_NUMERIC_WIDTH: u32 = 246;
 const OVERLAY_NUMERIC_HEIGHT: u32 = 34;
 const OVERLAY_EXPANDED_WIDTH: u32 = 310;
 const OVERLAY_EXPANDED_HEIGHT: u32 = 500;
@@ -788,27 +785,35 @@ fn parse_overlay_layout_mode(mode: &str) -> Result<OverlayLayoutMode, String> {
     }
 }
 
-fn overlay_metric_count(metrics: &[String]) -> u32 {
-    let count = metrics
-        .iter()
-        .filter(|id| matches!(id.as_str(), "cpu" | "mem" | "temp" | "gpu" | "net" | "codex_primary" | "codex_secondary"))
-        .count() as u32;
-    count.clamp(1, 7)
-}
-
 fn collapsed_overlay_size(style: OverlayStyle, metrics: &[String]) -> (u32, u32) {
-    let count = overlay_metric_count(metrics);
-    let codex_count = metrics.iter().filter(|id| id.starts_with("codex_")).count().min(count as usize) as u32;
+    // 与 overlay.css 的内边距、展开按钮、分隔符和各指标的最长常见读数对应。
+    let mut count = 0_u32;
+    let mut capsule_width = 60;
+    let mut vertical_height = 26;
+    let mut numeric_width = 50;
+    for metric in metrics {
+        let (capsule, vertical, numeric) = match metric.as_str() {
+            "cpu" | "mem" => (65, 29, 22),
+            "temp" => (74, 29, 22),
+            "gpu" => (66, 52, 22),
+            "net" => (98, 39, 94),
+            "codex_primary" => (166, 42, 136),
+            "codex_secondary" => (136, 42, 136),
+            _ => continue,
+        };
+        count += 1;
+        capsule_width += capsule;
+        vertical_height += vertical;
+        numeric_width += numeric;
+    }
+    let separators = count.saturating_sub(1);
     match style {
         OverlayStyle::Capsule => (
-            OVERLAY_COLLAPSED_WIDTH - 5 * 62 + (count - codex_count) * 62 + codex_count * 150,
+            capsule_width + separators * 7,
             OVERLAY_COLLAPSED_HEIGHT,
         ),
-        OverlayStyle::Vertical => (
-            OVERLAY_VERTICAL_WIDTH,
-            OVERLAY_VERTICAL_HEIGHT - 5 * 32 + count * 32 + codex_count * 16,
-        ),
-        OverlayStyle::Numeric => (OVERLAY_NUMERIC_WIDTH - 5 * 36 + (count - codex_count) * 36 + codex_count * 118, OVERLAY_NUMERIC_HEIGHT),
+        OverlayStyle::Vertical => (OVERLAY_VERTICAL_WIDTH, vertical_height + separators * 6),
+        OverlayStyle::Numeric => (numeric_width + separators * 14, OVERLAY_NUMERIC_HEIGHT),
     }
 }
 
@@ -864,8 +869,8 @@ fn apply_overlay_layout(mode: OverlayLayoutMode, app: &AppHandle) -> Result<(), 
     let prev_y = prev_pos.y as f64 / scale;
     let prev_w = prev_size.width as f64 / scale;
     let prev_h = prev_size.height as f64 / scale;
-    let next_w = width as f64;
-    let next_h = height as f64;
+    let mut next_w = width as f64;
+    let mut next_h = height as f64;
     let prev_right = prev_x + prev_w;
     let prev_bottom = prev_y + prev_h;
 
@@ -880,8 +885,10 @@ fn apply_overlay_layout(mode: OverlayLayoutMode, app: &AppHandle) -> Result<(), 
         let wy = work.position.y as f64 / scale;
         let ww = work.size.width as f64 / scale;
         let wh = work.size.height as f64 / scale;
-        let max_x = wx + ww - next_w;
-        let max_y = wy + wh - next_h;
+        next_w = next_w.min(ww.max(1.0));
+        next_h = next_h.min(wh.max(1.0));
+        let max_x = wx + (ww - next_w).max(0.0);
+        let max_y = wy + (wh - next_h).max(0.0);
 
         let dist_left = prev_x - wx;
         let dist_right = wx + ww - prev_right;
@@ -1990,17 +1997,27 @@ mod overlay_layout_tests {
     #[test]
     fn codex_only_layout_fits_both_quota_items() {
         let metrics = vec!["codex_primary".to_string(), "codex_secondary".to_string()];
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (368, 38));
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Numeric, &metrics), (302, 34));
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Vertical, &metrics), (76, 136));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (369, 38));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Numeric, &metrics), (336, 34));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Vertical, &metrics), (76, 116));
     }
 
     #[test]
-    fn hardware_only_keeps_existing_dimensions_and_mixed_layout_grows() {
-        let mut metrics = vec!["cpu", "mem", "temp", "gpu", "net"].into_iter().map(String::from).collect::<Vec<_>>();
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (378, 38));
+    fn hardware_and_quota_layouts_reserve_space_for_full_readings() {
+        let mut metrics = ["cpu", "mem", "temp", "gpu", "net"].map(String::from).to_vec();
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (456, 38));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Numeric, &metrics), (288, 34));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Vertical, &metrics), (76, 228));
         metrics.extend(["codex_primary".to_string(), "codex_secondary".to_string()]);
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (678, 38));
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Vertical, &metrics), (76, 296));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (772, 38));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Numeric, &metrics), (588, 34));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Vertical, &metrics), (76, 324));
+    }
+
+    #[test]
+    fn network_only_gets_more_space_than_single_value_metrics() {
+        let metrics = ["net".to_string()];
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (158, 38));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Numeric, &metrics), (144, 34));
     }
 }

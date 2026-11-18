@@ -169,7 +169,6 @@ export function initializeCodex() {
       node.title = snapshot.error
         ? `${snapshot.error}\n${retryText}${time ? ` · 保留 ${time} 查询的额度数据` : ''}`
         : node.textContent;
-      node.classList.toggle('quota-stale', !fresh);
     });
     document.querySelectorAll<HTMLButtonElement>('[data-codex-refresh]').forEach((button) => {
       button.disabled = !snapshot.enabled || snapshot.refreshing;
