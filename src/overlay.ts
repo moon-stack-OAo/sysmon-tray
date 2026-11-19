@@ -67,6 +67,12 @@ let lastMetrics: Metrics | null = null;
 let style: OverlayStyle = 'capsule';
 let layoutQueue: Promise<void> = Promise.resolve();
 let layoutDepth = 0;
+let layoutRevision = 0;
+let fittedWidth: number | undefined;
+let widthFrame: number | undefined;
+let widthShrinkTimer: number | undefined;
+const WIDTH_STEP = 8;
+const WIDTH_SHRINK_DELAY_MS = 5000;
 let autoHide = false;
 let edgeX: 'left' | 'right' | null = null;
 let hideTimer: number | undefined;
@@ -384,8 +390,81 @@ function enqueueLayout(task: () => Promise<void>): Promise<void> {
   return run;
 }
 
+function measureCollapsedWidth(): number | undefined {
+  if (mode !== 'collapsed' || style === 'vertical') return undefined;
+  const root = document.querySelector<HTMLElement>('#overlay-root');
+  const strip = root?.querySelector<HTMLElement>(style === 'numeric' ? '.numeric-strip' : '.strip');
+  if (!root || !strip) return undefined;
+  const css = getComputedStyle(root);
+  const extra = [
+    css.paddingLeft, css.paddingRight, css.borderLeftWidth, css.borderRightWidth,
+    css.marginLeft, css.marginRight,
+  ].reduce((sum, value) => sum + (Number.parseFloat(value) || 0), 0);
+  const width = strip.getBoundingClientRect().width;
+  return width > 0 ? Math.ceil((width + extra) / WIDTH_STEP) * WIDTH_STEP : undefined;
+}
+
+function clearWidthShrinkTimer() {
+  if (widthShrinkTimer !== undefined) window.clearTimeout(widthShrinkTimer);
+  widthShrinkTimer = undefined;
+}
+
+async function fitCollapsedWidth(immediate = false) {
+  const revision = layoutRevision;
+  await enqueueLayout(async () => {
+    if (revision !== layoutRevision || pointerDown) return;
+    const width = measureCollapsedWidth();
+    if (width === undefined || width === fittedWidth) {
+      clearWidthShrinkTimer();
+      return;
+    }
+    if (!immediate && fittedWidth !== undefined && width < fittedWidth) {
+      if (widthShrinkTimer === undefined) {
+        widthShrinkTimer = window.setTimeout(() => {
+          widthShrinkTimer = undefined;
+          void fitCollapsedWidth(true).catch((error) => console.error('适配叠加层宽度失败', error));
+        }, WIDTH_SHRINK_DELAY_MS);
+      }
+      return;
+    }
+    clearWidthShrinkTimer();
+    await invoke('set_overlay_layout', { mode: 'collapsed', width });
+    fittedWidth = width;
+  });
+}
+
+function scheduleWidthMeasurement() {
+  if (widthFrame !== undefined) return;
+  widthFrame = requestAnimationFrame(() => {
+    widthFrame = undefined;
+    void fitCollapsedWidth().catch((error) => console.error('适配叠加层宽度失败', error));
+  });
+}
+
+function initializeContentSizing() {
+  const root = document.querySelector('#overlay-root');
+  if (!root) return;
+  const mutations = new MutationObserver(scheduleWidthMeasurement);
+  mutations.observe(root, {
+    subtree: true, childList: true, characterData: true, attributes: true,
+    attributeFilter: ['hidden'],
+  });
+  const resize = new ResizeObserver(scheduleWidthMeasurement);
+  root.querySelectorAll('.strip, .numeric-strip').forEach((strip) => resize.observe(strip));
+  void document.fonts.ready.then(scheduleWidthMeasurement);
+  document.fonts.addEventListener('loadingdone', scheduleWidthMeasurement);
+  window.addEventListener('beforeunload', () => {
+    mutations.disconnect();
+    resize.disconnect();
+    clearWidthShrinkTimer();
+    if (widthFrame !== undefined) cancelAnimationFrame(widthFrame);
+    document.fonts.removeEventListener('loadingdone', scheduleWidthMeasurement);
+  });
+}
+
 async function applyLayout(next: OverlayMode, force = false, nextStyle?: OverlayStyle) {
-  if (!force && mode === next) return;
+  layoutRevision += 1;
+  clearWidthShrinkTimer();
   await enqueueLayout(async () => {
     if (!force && mode === next) return;
     layoutDepth += 1;
@@ -402,6 +481,12 @@ async function applyLayout(next: OverlayMode, force = false, nextStyle?: Overlay
       applyModeClass(mode);
       // 每秒只更新当前可见视图，切换后需立即刷新一次新视图
       if (lastMetrics && isHardwareVisible()) refreshActiveView(lastMetrics);
+      fittedWidth = undefined;
+      const width = measureCollapsedWidth();
+      if (width !== undefined) {
+        await invoke('set_overlay_layout', { mode: next, width });
+        fittedWidth = width;
+      }
     } catch (error) {
       console.error('切换叠加层布局失败', error);
       applyModeClass(mode);
@@ -919,6 +1004,7 @@ window.addEventListener('DOMContentLoaded', () => {
   initializeCodex();
   initializeHardware<Metrics>(refreshOverlay);
   bindCollapseUi();
+  initializeContentSizing();
   applyStyleClass('capsule');
   applyModeClass('collapsed');
   mode = 'collapsed';

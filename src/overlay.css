@@ -164,9 +164,24 @@ body {
   justify-content: flex-start;
 }
 
+.overlay.collapsed.style-capsule,
+.overlay.collapsed.style-numeric {
+  padding: 0 4px 0 8px;
+}
+
 .overlay.collapsed.style-numeric {
   border-radius: var(--radius-pill);
-  padding: 0 6px 0 10px;
+}
+
+.overlay.collapsed.style-capsule .strip,
+.overlay.collapsed.style-numeric .numeric-strip {
+  width: max-content;
+  flex-shrink: 0;
+}
+
+.overlay.collapsed.style-capsule .icon-btn,
+.overlay.collapsed.style-numeric .icon-btn {
+  margin-left: 3px;
 }
 
 .overlay.peek {
@@ -211,7 +226,7 @@ body {
 .numeric-strip {
   display: none;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   min-height: 26px;
   width: 100%;
   overflow: hidden;
@@ -222,9 +237,8 @@ body {
 }
 
 .num-v {
+  flex: 0 0 auto;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
@@ -243,7 +257,8 @@ body {
 }
 
 .num-sep {
-  flex-shrink: 0;
+  flex: 0 0 6px;
+  text-align: center;
   color: var(--meta);
   font-size: 11px;
 }
@@ -358,7 +373,8 @@ body {
 .strip-metric {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  flex: 0 0 auto;
+  gap: 3px;
   white-space: nowrap;
   min-width: 0;
   overflow: hidden;
@@ -366,9 +382,7 @@ body {
 }
 
 .strip-metric > :not(.strip-dot) {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex-shrink: 0;
 }
 
 .strip-metric[hidden],
@@ -386,7 +400,7 @@ body {
 .strip-sep {
   width: 1px;
   height: 12px;
-  margin: 0 3px;
+  margin: 0 2px;
   background: var(--border-strong);
   flex-shrink: 0;
 }

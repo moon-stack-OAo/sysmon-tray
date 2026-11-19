@@ -1,6 +1,6 @@
 [package]
 name = "sysmon-tray"
-version = "0.1.8"
+version = "0.1.9"
 description = "System monitor tray app"
 authors = ["you"]
 edition = "2021"

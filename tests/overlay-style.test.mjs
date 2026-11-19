@@ -4,6 +4,25 @@ import { createRequire } from 'node:module';
 import test from 'node:test';
 import vm from 'node:vm';
 
+const css = readFileSync(new URL('../src/overlay.css', import.meta.url), 'utf8');
+
+function cssDeclarations(selector) {
+  const rule = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find(([_, selectors]) =>
+    selectors
+      .split(',')
+      .map((value) => value.trim())
+      .includes(selector),
+  );
+  assert.ok(rule, `Missing CSS rule: ${selector}`);
+  return Object.fromEntries(
+    rule[2]
+      .trim()
+      .split(';')
+      .filter((declaration) => declaration.trim())
+      .map((declaration) => declaration.split(':').map((value) => value.trim())),
+  );
+}
+
 const require = createRequire(import.meta.url);
 const ts = require('typescript');
 const source = ts.createSourceFile(
@@ -17,6 +36,16 @@ const names = new Set([
   'style',
   'layoutQueue',
   'layoutDepth',
+  'layoutRevision',
+  'fittedWidth',
+  'widthFrame',
+  'widthShrinkTimer',
+  'WIDTH_STEP',
+  'WIDTH_SHRINK_DELAY_MS',
+  'measureCollapsedWidth',
+  'clearWidthShrinkTimer',
+  'fitCollapsedWidth',
+  'scheduleWidthMeasurement',
   'autoHide',
   'edgeX',
   'hideTimer',
@@ -67,7 +96,11 @@ function fixture() {
   let config = { overlayEnabled: true, overlayStyle: 'capsule', overlayAutoHide: false };
   let readConfig = async () => config;
   let resize = async () => {};
+  let contentWidth = 100;
+  const timers = new Map();
+  let timerId = 0;
   const root = {
+    querySelector: () => ({ getBoundingClientRect: () => ({ width: contentWidth }) }),
     classList: {
       add: (...values) => values.forEach((value) => classes.add(value)),
       remove: (...values) => values.forEach((value) => classes.delete(value)),
@@ -77,7 +110,12 @@ function fixture() {
   const context = vm.createContext({
     document: { querySelector: () => root },
     window: {
-      clearTimeout() {},
+      clearTimeout: (id) => timers.delete(id),
+      setTimeout: (callback, delay) => {
+        const id = ++timerId;
+        timers.set(id, { callback, delay });
+        return id;
+      },
       setInterval: (callback, delay) => {
         intervals.set(delay, callback);
         return delay;
@@ -86,6 +124,11 @@ function fixture() {
       addEventListener() {},
     },
     requestAnimationFrame: (callback) => callback(),
+    pointerDown: false,
+    getComputedStyle: () => ({
+      paddingLeft: '8px', paddingRight: '4px', borderLeftWidth: '1px',
+      borderRightWidth: '1px', marginLeft: '3px', marginRight: '3px',
+    }),
     invoke: async (command, args) => {
       calls.push({ command, args });
       if (command === 'get_app_config') return readConfig();
@@ -118,6 +161,8 @@ function fixture() {
     errors,
     listeners,
     intervals,
+    timers,
+    setContentWidth: (value) => (contentWidth = value),
     setConfig: (value) => (config = { ...config, ...value }),
     deferConfig: (reader) => (readConfig = reader),
     setResize: (callback) => (resize = callback),
@@ -127,6 +172,34 @@ function fixture() {
     layouts: () => calls.filter(({ command }) => command === 'set_overlay_layout'),
   };
 }
+
+test('horizontal strips compact spacing without shrinking readings or the expand button', () => {
+  assert.equal(cssDeclarations('.overlay.collapsed.style-capsule').padding, '0 4px 0 8px');
+  assert.equal(cssDeclarations('.overlay.collapsed.style-numeric').padding, '0 4px 0 8px');
+  assert.equal(cssDeclarations('.strip-metric').gap, '3px');
+  assert.equal(cssDeclarations('.strip-metric').flex, '0 0 auto');
+  assert.equal(cssDeclarations('.strip-metric > :not(.strip-dot)')['flex-shrink'], '0');
+  assert.equal(cssDeclarations('.num-v').flex, '0 0 auto');
+  assert.equal(cssDeclarations('.num-v')['white-space'], 'nowrap');
+  assert.equal(cssDeclarations('.num-v')['text-overflow'], undefined);
+  assert.equal(cssDeclarations('.icon-btn').width, '22px');
+  assert.equal(cssDeclarations('.icon-btn')['flex-shrink'], '0');
+});
+
+test('horizontal separator widths match the backend spacing budget', () => {
+  const capsule = cssDeclarations('.strip-sep');
+  assert.equal(capsule.width, '1px');
+  assert.equal(capsule.margin, '0 2px');
+  assert.equal(cssDeclarations('.numeric-strip').gap, '3px');
+  assert.equal(cssDeclarations('.num-sep').flex, '0 0 6px');
+});
+
+test('vertical and expanded panel spacing stays unchanged', () => {
+  assert.equal(cssDeclarations('.overlay.collapsed.style-vertical').padding, '8px 6px');
+  assert.equal(cssDeclarations('.vertical-strip').gap, '6px');
+  assert.equal(cssDeclarations('.overlay:not(.collapsed):not(.peek)').padding, '8px 10px');
+  assert.equal(cssDeclarations('.overlay:not(.collapsed):not(.peek)').gap, '6px');
+});
 
 test('a shape change leaves the peek hot zone and updates both layout and classes', async () => {
   const view = fixture();
@@ -240,13 +313,74 @@ test('showing the overlay reconciles its shape immediately', async () => {
   assert.equal(view.state('style'), 'vertical');
 });
 
+test('measured horizontal widths include chrome and quantize without fixed metric budgets', async () => {
+  const view = fixture();
+  await view.context.applyOverlayStyle('capsule');
+  assert.equal(view.layouts().at(-1).args.width, 120);
+  assert.equal(cssDeclarations('.overlay.collapsed.style-capsule .strip').width, 'max-content');
+  assert.equal(cssDeclarations('.overlay.collapsed.style-capsule .icon-btn')['margin-left'], '3px');
+  const before = view.layouts().length;
+  await view.context.fitCollapsedWidth();
+  assert.equal(view.layouts().length, before);
+  view.setContentWidth(110);
+  await view.context.fitCollapsedWidth();
+  assert.equal(view.layouts().at(-1).args.width, 136);
+});
+
+test('growth is immediate but shrinking waits and coalesces current content', async () => {
+  const view = fixture();
+  await view.context.applyOverlayStyle('numeric');
+  view.setContentWidth(180);
+  await view.context.fitCollapsedWidth();
+  assert.equal(view.layouts().at(-1).args.width, 200);
+  view.setContentWidth(90);
+  await view.context.fitCollapsedWidth();
+  const before = view.layouts().length;
+  const timer = [...view.timers.values()][0];
+  assert.equal(timer.delay, 5000);
+  view.setContentWidth(100);
+  await view.context.fitCollapsedWidth();
+  assert.equal(view.timers.size, 1);
+  assert.equal(view.layouts().length, before);
+  timer.callback();
+  await view.state('layoutQueue');
+  assert.equal(view.layouts().at(-1).args.width, 120);
+});
+
+test('a queued measurement cannot restore collapsed after a newer layout request', async () => {
+  for (const next of ['expanded', 'peek', 'vertical']) {
+    const view = fixture();
+    await view.context.applyOverlayStyle('capsule');
+    view.setContentWidth(180);
+    const measurement = view.context.fitCollapsedWidth();
+    const transition = next === 'vertical'
+      ? view.context.applyOverlayStyle(next)
+      : view.context.setMode(next);
+    await Promise.all([measurement, transition]);
+    assert.equal(view.layouts().filter(({ args }) => args.width === 200).length, 0);
+    assert.equal(view.layouts().at(-1).args.width, undefined);
+    assert.equal(view.timers.size, 0);
+  }
+});
+
+test('a failed width application can retry and does not poison layout serialization', async () => {
+  const view = fixture();
+  view.setResize(async () => { throw new Error('width failed'); });
+  await assert.rejects(view.context.fitCollapsedWidth(), /width failed/);
+  view.setResize(async () => {});
+  await view.context.fitCollapsedWidth();
+  assert.equal(view.layouts().at(-1).args.width, 120);
+  await view.context.setMode('expanded');
+  assert.equal(view.state('mode'), 'expanded');
+});
+
 test('metric changes resize a collapsed shape but do not collapse an expanded panel', async () => {
   const view = fixture();
   await view.context.loadOverlayConfig();
   view.setConfig({ overlayMetrics: ['cpu', 'mem'] });
   const initial = view.layouts().length;
   await view.context.loadOverlayConfig();
-  assert.equal(view.layouts().length, initial + 1);
+  assert.equal(view.layouts().length, initial + 2);
   await view.context.setMode('expanded');
   const expanded = view.layouts().length;
   view.setConfig({ overlayMetrics: ['cpu'] });

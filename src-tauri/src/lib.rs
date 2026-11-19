@@ -788,14 +788,14 @@ fn parse_overlay_layout_mode(mode: &str) -> Result<OverlayLayoutMode, String> {
 fn collapsed_overlay_size(style: OverlayStyle, metrics: &[String]) -> (u32, u32) {
     // 与 overlay.css 的内边距、展开按钮、分隔符和各指标的最长常见读数对应。
     let mut count = 0_u32;
-    let mut capsule_width = 60;
+    let mut capsule_width = 54;
     let mut vertical_height = 26;
-    let mut numeric_width = 50;
+    let mut numeric_width = 46;
     for metric in metrics {
         let (capsule, vertical, numeric) = match metric.as_str() {
-            "cpu" | "mem" => (65, 29, 22),
-            "temp" => (74, 29, 22),
-            "gpu" => (66, 52, 22),
+            "cpu" | "mem" => (64, 29, 22),
+            "temp" => (64, 29, 22),
+            "gpu" => (64, 52, 22),
             "net" => (98, 39, 94),
             "codex_primary" => (166, 42, 136),
             "codex_secondary" => (136, 42, 136),
@@ -809,11 +809,11 @@ fn collapsed_overlay_size(style: OverlayStyle, metrics: &[String]) -> (u32, u32)
     let separators = count.saturating_sub(1);
     match style {
         OverlayStyle::Capsule => (
-            capsule_width + separators * 7,
+            capsule_width + separators * 5,
             OVERLAY_COLLAPSED_HEIGHT,
         ),
         OverlayStyle::Vertical => (OVERLAY_VERTICAL_WIDTH, vertical_height + separators * 6),
-        OverlayStyle::Numeric => (numeric_width + separators * 14, OVERLAY_NUMERIC_HEIGHT),
+        OverlayStyle::Numeric => (numeric_width + separators * 12, OVERLAY_NUMERIC_HEIGHT),
     }
 }
 
@@ -834,7 +834,32 @@ fn overlay_layout_size(
     }
 }
 
+fn validated_overlay_width(
+    mode: OverlayLayoutMode,
+    style: OverlayStyle,
+    width: Option<f64>,
+) -> Result<Option<u32>, String> {
+    let Some(width) = width else { return Ok(None) };
+    if !width.is_finite() || width <= 0.0 {
+        return Err("叠加层宽度必须是有限正数".to_string());
+    }
+    if mode != OverlayLayoutMode::Collapsed || style == OverlayStyle::Vertical {
+        return Ok(None);
+    }
+    Ok(Some(width.ceil().clamp(48.0, 4096.0) as u32))
+}
+
 fn apply_overlay_layout(mode: OverlayLayoutMode, app: &AppHandle) -> Result<(), String> {
+    apply_overlay_layout_with_width(mode, None, app)
+}
+
+fn apply_overlay_layout_with_width(
+    mode: OverlayLayoutMode,
+    measured_width: Option<f64>,
+    app: &AppHandle,
+) -> Result<(), String> {
+    static LAYOUT_LOCK: Mutex<()> = Mutex::new(());
+    let _layout = LAYOUT_LOCK.lock().map_err(|e| e.to_string())?;
     let window = app
         .get_webview_window("overlay")
         .ok_or_else(|| "叠加层窗口不存在".to_string())?;
@@ -855,7 +880,9 @@ fn apply_overlay_layout(mode: OverlayLayoutMode, app: &AppHandle) -> Result<(), 
         )
     };
 
-    let (width, height) = overlay_layout_size(mode, style, edge_x, edge_y, &metrics);
+    let fitted_width = validated_overlay_width(mode, style, measured_width)?;
+    let (fallback_width, height) = overlay_layout_size(mode, style, edge_x, edge_y, &metrics);
+    let width = fitted_width.unwrap_or(fallback_width);
 
     let scale = window.scale_factor().unwrap_or(1.0);
     let prev_pos = window
@@ -981,7 +1008,9 @@ fn apply_overlay_layout(mode: OverlayLayoutMode, app: &AppHandle) -> Result<(), 
         .set_position(PhysicalPosition::new(physical_x, physical_y))
         .map_err(|e| format!("设置叠加层位置失败: {e}"))?;
 
-    persist_overlay_position(app, physical_x, physical_y, next_edge_x, next_edge_y);
+    if fitted_width.is_none() {
+        persist_overlay_position(app, physical_x, physical_y, next_edge_x, next_edge_y);
+    }
     Ok(())
 }
 
@@ -996,9 +1025,9 @@ fn set_overlay_collapsed(collapsed: bool, app: AppHandle) -> Result<(), String> 
 }
 
 #[tauri::command]
-fn set_overlay_layout(mode: String, app: AppHandle) -> Result<(), String> {
+fn set_overlay_layout(mode: String, width: Option<f64>, app: AppHandle) -> Result<(), String> {
     let parsed = parse_overlay_layout_mode(mode.trim())?;
-    apply_overlay_layout(parsed, &app)
+    apply_overlay_layout_with_width(parsed, width, &app)
 }
 
 #[tauri::command]
@@ -1995,29 +2024,46 @@ mod overlay_layout_tests {
     use super::*;
 
     #[test]
+    fn measured_width_is_validated_and_only_applies_to_horizontal_collapsed() {
+        let collapsed = OverlayLayoutMode::Collapsed;
+        let capsule = OverlayStyle::Capsule;
+        assert_eq!(validated_overlay_width(collapsed, capsule, Some(123.2)), Ok(Some(124)));
+        assert_eq!(validated_overlay_width(collapsed, capsule, Some(1.0)), Ok(Some(48)));
+        assert_eq!(validated_overlay_width(collapsed, capsule, Some(99999.0)), Ok(Some(4096)));
+        for width in [f64::NAN, f64::INFINITY, -1.0, 0.0] {
+            assert!(validated_overlay_width(collapsed, capsule, Some(width)).is_err());
+        }
+        assert_eq!(validated_overlay_width(collapsed, capsule, None), Ok(None));
+        assert_eq!(validated_overlay_width(collapsed, OverlayStyle::Vertical, Some(200.0)), Ok(None));
+        for mode in [OverlayLayoutMode::Expanded, OverlayLayoutMode::Peek] {
+            assert_eq!(validated_overlay_width(mode, capsule, Some(200.0)), Ok(None));
+        }
+    }
+
+    #[test]
     fn codex_only_layout_fits_both_quota_items() {
         let metrics = vec!["codex_primary".to_string(), "codex_secondary".to_string()];
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (369, 38));
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Numeric, &metrics), (336, 34));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (361, 38));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Numeric, &metrics), (330, 34));
         assert_eq!(collapsed_overlay_size(OverlayStyle::Vertical, &metrics), (76, 116));
     }
 
     #[test]
     fn hardware_and_quota_layouts_reserve_space_for_full_readings() {
         let mut metrics = ["cpu", "mem", "temp", "gpu", "net"].map(String::from).to_vec();
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (456, 38));
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Numeric, &metrics), (288, 34));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (428, 38));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Numeric, &metrics), (276, 34));
         assert_eq!(collapsed_overlay_size(OverlayStyle::Vertical, &metrics), (76, 228));
         metrics.extend(["codex_primary".to_string(), "codex_secondary".to_string()]);
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (772, 38));
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Numeric, &metrics), (588, 34));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (740, 38));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Numeric, &metrics), (572, 34));
         assert_eq!(collapsed_overlay_size(OverlayStyle::Vertical, &metrics), (76, 324));
     }
 
     #[test]
     fn network_only_gets_more_space_than_single_value_metrics() {
         let metrics = ["net".to_string()];
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (158, 38));
-        assert_eq!(collapsed_overlay_size(OverlayStyle::Numeric, &metrics), (144, 34));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Capsule, &metrics), (152, 38));
+        assert_eq!(collapsed_overlay_size(OverlayStyle::Numeric, &metrics), (140, 34));
     }
 }
