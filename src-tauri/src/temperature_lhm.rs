@@ -245,21 +245,14 @@ impl TemperatureProvider for LibreHardwareMonitorProvider {
 
         let url = Self::data_url(&self.runtime.base_url());
         match self.fetch_and_parse(&url) {
-            Some(parsed) => match parsed.cpu_temp {
-                Some(temp) => {
-                    self.record_success();
-                    self.store_extras_cache(LhmExtras {
-                        gpu: parsed.gpu,
-                        fans: parsed.fans,
-                    });
-                    Some(temp)
-                }
-                // 服务可达但没有 CPU 温度：不记成功也不记失败，清空 extras 以免回退帧沿用 GPU/风扇
-                None => {
-                    self.clear_extras_cache();
-                    None
-                }
-            },
+            Some(parsed) => {
+                self.record_success();
+                self.store_extras_cache(LhmExtras {
+                    gpu: parsed.gpu,
+                    fans: parsed.fans,
+                });
+                parsed.cpu_temp
+            }
             None => {
                 self.record_failure();
                 self.clear_extras_cache();
@@ -841,6 +834,186 @@ fn parse_lhm_number(raw: &str) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn extras_only_tree() -> Value {
+        serde_json::json!({
+            "Text": "Computer",
+            "Children": [
+                {
+                    "Text": "NVIDIA GeForce RTX 3080",
+                    "ImageURL": "images_icon/nvidia.png",
+                    "Children": [
+                        { "Text": "GPU Core", "Value": "45.0 %", "Type": "Load" }
+                    ]
+                },
+                { "Text": "CPU Fan", "Value": "2450 RPM", "Type": "Fan" }
+            ]
+        })
+    }
+
+    fn provider_with_responses(
+        bodies: Vec<String>,
+    ) -> (LibreHardwareMonitorProvider, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            for body in bodies {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "LHM test request timed out");
+                            std::thread::park_timeout(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("LHM test accept failed: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    assert_eq!(stream.read(&mut byte).unwrap(), 1);
+                    request.push(byte[0]);
+                }
+                assert!(request.starts_with(b"GET /data.json HTTP/1.1\r\n"));
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        let runtime = LhmRuntimeConfig::new(true, base_url);
+        let extras = Arc::new(Mutex::new(LhmExtras::default()));
+        (LibreHardwareMonitorProvider::new(runtime, extras), server)
+    }
+
+    fn assert_extras_present(extras: &SharedLhmExtras) {
+        let extras = extras.lock().unwrap();
+        let gpu = extras.gpu.as_ref().expect("GPU without CPU temperature");
+        assert_eq!(gpu.load_percent, Some(45.0));
+        assert_eq!(extras.fans.len(), 1);
+        assert_eq!(extras.fans[0].rpm, 2450);
+    }
+
+    fn assert_extras_empty(extras: &SharedLhmExtras) {
+        let extras = extras.lock().unwrap();
+        assert!(extras.gpu.is_none());
+        assert!(extras.fans.is_empty());
+    }
+
+    #[test]
+    fn successful_response_preserves_extras_without_cpu_temperature() {
+        let extras_only = extras_only_tree();
+        assert!(extract_lhm_metrics(&extras_only).cpu_temp.is_none());
+        let mut with_cpu = extras_only.clone();
+        with_cpu["Children"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "Text": "CPU Package", "Value": "61.0 °C", "Type": "Temperature"
+            }));
+        let (mut provider, server) = provider_with_responses(vec![
+            with_cpu.to_string(),
+            extras_only.to_string(),
+            serde_json::json!({ "Text": "Computer", "Children": [] }).to_string(),
+        ]);
+        assert_eq!(provider.read_cpu_temp_celsius(), Some(61.0));
+        assert_extras_present(&provider.lhm_extras);
+        provider.consecutive_failures = CIRCUIT_FAIL_THRESHOLD - 1;
+        assert_eq!(provider.read_cpu_temp_celsius(), None);
+        assert_extras_present(&provider.lhm_extras);
+        assert_eq!(provider.consecutive_failures, 0);
+        assert!(provider.circuit_open_until.is_none());
+        assert_eq!(provider.read_cpu_temp_celsius(), None);
+        assert_extras_empty(&provider.lhm_extras);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn cpu_fallback_does_not_discard_lhm_extras() {
+        use crate::temperature::ChainedTemperatureProvider;
+
+        struct FixedTemperature(Option<f32>);
+        impl TemperatureProvider for FixedTemperature {
+            fn read_cpu_temp_celsius(&mut self) -> Option<f32> {
+                self.0
+            }
+        }
+
+        for (fallback_kind, fallback_temp) in [
+            (TempSourceKind::Wmi, Some(52.0)),
+            (TempSourceKind::Sysinfo, Some(48.0)),
+            (TempSourceKind::Sysinfo, None),
+        ] {
+            let (provider, server) = provider_with_responses(vec![extras_only_tree().to_string()]);
+            let extras = Arc::clone(&provider.lhm_extras);
+            let tracker = TempSourceTracker::new();
+            let mut chain = ChainedTemperatureProvider::new(
+                vec![
+                    (TempSourceKind::Lhm, Box::new(provider)),
+                    (fallback_kind, Box::new(FixedTemperature(fallback_temp))),
+                ],
+                Arc::clone(&tracker),
+            );
+            assert_eq!(chain.read_cpu_temp_celsius(), fallback_temp);
+            assert_extras_present(&extras);
+            assert_eq!(
+                tracker.get(),
+                if fallback_temp.is_some() {
+                    fallback_kind
+                } else {
+                    TempSourceKind::Unavailable
+                }
+            );
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn unavailable_lhm_clears_stale_extras() {
+        let (mut provider, server) =
+            provider_with_responses(vec![extras_only_tree().to_string(), "not json".to_string()]);
+        assert_eq!(provider.read_cpu_temp_celsius(), None);
+        assert_extras_present(&provider.lhm_extras);
+        assert_eq!(provider.read_cpu_temp_celsius(), None);
+        assert_extras_empty(&provider.lhm_extras);
+        assert_eq!(provider.consecutive_failures, 1);
+        server.join().unwrap();
+
+        let seed = || {
+            let parsed = extract_lhm_metrics(&extras_only_tree());
+            LhmExtras {
+                gpu: parsed.gpu,
+                fans: parsed.fans,
+            }
+        };
+        provider.store_extras_cache(seed());
+        provider.runtime.set_enabled(false);
+        assert_eq!(provider.read_cpu_temp_celsius(), None);
+        assert_extras_empty(&provider.lhm_extras);
+
+        provider.runtime.set_enabled(true);
+        provider.sync_epoch();
+        provider.store_extras_cache(seed());
+        provider.consecutive_failures = CIRCUIT_FAIL_THRESHOLD - 1;
+        provider.record_failure();
+        assert!(provider.circuit_blocked());
+        assert_eq!(provider.read_cpu_temp_celsius(), None);
+        assert_extras_empty(&provider.lhm_extras);
+    }
 
     #[test]
     fn parse_temp_string() {

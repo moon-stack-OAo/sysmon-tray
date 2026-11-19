@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
@@ -88,22 +88,45 @@ fn retry_delay_secs(failures: u32) -> u64 {
     }
 }
 
+struct QueryCancellation<'a> {
+    stop: &'a AtomicBool,
+    epoch: &'a AtomicU64,
+    expected: u64,
+}
+
+impl QueryCancellation<'_> {
+    fn cancelled(&self) -> bool {
+        self.stop.load(Ordering::Acquire) || self.epoch.load(Ordering::Acquire) != self.expected
+    }
+}
+
 fn query_with_reconnect<C, T>(
     connection: &mut Option<C>,
-    stop: &AtomicBool,
-    mut connect: impl FnMut() -> Result<C, String>,
-    mut query: impl FnMut(&mut C) -> Result<T, String>,
-) -> Result<T, String> {
+    cancellation: &QueryCancellation<'_>,
+    mut connect: impl FnMut() -> Result<Option<C>, String>,
+    mut query: impl FnMut(&mut C) -> Result<Option<T>, String>,
+) -> Result<Option<T>, String> {
     for attempt in 0..2 {
-        if stop.load(Ordering::Relaxed) {
-            return Err("额度监测已停止。".to_string());
+        if cancellation.cancelled() {
+            connection.take();
+            return Ok(None);
         }
         let result = (|| {
             if connection.is_none() {
-                *connection = Some(connect()?);
+                *connection = connect()?;
             }
-            query(connection.as_mut().unwrap())
+            if cancellation.cancelled() {
+                return Ok(None);
+            }
+            match connection.as_mut() {
+                Some(connection) => query(connection),
+                None => Ok(None),
+            }
         })();
+        if cancellation.cancelled() || matches!(result, Ok(None)) {
+            connection.take();
+            return Ok(None);
+        }
         match result {
             Ok(result) => return Ok(result),
             Err(error) => {
@@ -115,6 +138,39 @@ fn query_with_reconnect<C, T>(
         }
     }
     unreachable!()
+}
+
+fn wait_response(
+    messages: &mpsc::Receiver<Value>,
+    id: u64,
+    cancellation: &QueryCancellation<'_>,
+) -> Result<Option<Value>, String> {
+    let deadline = Instant::now() + REQUEST_TIMEOUT;
+    while Instant::now() < deadline {
+        if cancellation.cancelled() {
+            return Ok(None);
+        }
+        let message = messages.recv_timeout(Duration::from_millis(50));
+        if cancellation.cancelled() {
+            return Ok(None);
+        }
+        match message {
+            Ok(message) if message["id"].as_u64() == Some(id) => {
+                if message.get("error").is_some() {
+                    return Err("额度查询失败，请检查网络并确认 Codex 已登录 ChatGPT 账户。"
+                        .to_string());
+                }
+                return message
+                    .get("result")
+                    .cloned()
+                    .map(Some)
+                    .ok_or_else(|| "Codex 返回了无效的额度响应。".to_string());
+            }
+            Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(_) => return Err("Codex 查询进程已退出，请检查登录状态后刷新。".to_string()),
+        }
+    }
+    Err("额度查询超时，稍后会自动重试。".to_string())
 }
 
 pub fn normalize_quota(result: &Value) -> Result<Vec<QuotaBucket>, String> {
@@ -238,7 +294,10 @@ struct CodexProcess {
 }
 
 impl CodexProcess {
-    fn start(stop: &AtomicBool) -> Result<Self, String> {
+    fn start(cancellation: &QueryCancellation<'_>) -> Result<Option<Self>, String> {
+        if cancellation.cancelled() {
+            return Ok(None);
+        }
         let mut command = Command::new(codex_executable()?);
         command
             .args(["app-server", "--listen", "stdio://"])
@@ -273,9 +332,13 @@ impl CodexProcess {
             reader: Some(reader),
             next_id: 1,
         };
-        process.request("initialize", Some(json!({"clientInfo":{"name":"sysmon_codex_quota","title":"SysMon","version":env!("CARGO_PKG_VERSION")},"capabilities":{}})), stop)?;
+        if process.request("initialize", Some(json!({"clientInfo":{"name":"sysmon_codex_quota","title":"SysMon","version":env!("CARGO_PKG_VERSION")},"capabilities":{}})), cancellation)?.is_none()
+            || cancellation.cancelled()
+        {
+            return Ok(None);
+        }
         process.write(&json!({"method":"initialized"}))?;
-        Ok(process)
+        Ok(Some(process))
     }
 
     fn write(&mut self, message: &Value) -> Result<(), String> {
@@ -289,8 +352,11 @@ impl CodexProcess {
         &mut self,
         method: &str,
         params: Option<Value>,
-        stop: &AtomicBool,
-    ) -> Result<Value, String> {
+        cancellation: &QueryCancellation<'_>,
+    ) -> Result<Option<Value>, String> {
+        if cancellation.cancelled() {
+            return Ok(None);
+        }
         let id = self.next_id;
         self.next_id += 1;
         let mut message = json!({"id":id,"method":method});
@@ -298,27 +364,7 @@ impl CodexProcess {
             message["params"] = params;
         }
         self.write(&message)?;
-        let deadline = Instant::now() + REQUEST_TIMEOUT;
-        while Instant::now() < deadline {
-            if stop.load(Ordering::Relaxed) {
-                return Err("额度监测已停止。".to_string());
-            }
-            match self.messages.recv_timeout(Duration::from_millis(200)) {
-                Ok(message) if message["id"].as_u64() == Some(id) => {
-                    if message.get("error").is_some() {
-                        return Err("额度查询失败，请检查网络并确认 Codex 已登录 ChatGPT 账户。"
-                            .to_string());
-                    }
-                    return message
-                        .get("result")
-                        .cloned()
-                        .ok_or_else(|| "Codex 返回了无效的额度响应。".to_string());
-                }
-                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(_) => return Err("Codex 查询进程已退出，请检查登录状态后刷新。".to_string()),
-            }
-        }
-        Err("额度查询超时，稍后会自动重试。".to_string())
+        wait_response(&self.messages, id, cancellation)
     }
 }
 
@@ -335,18 +381,30 @@ impl Drop for CodexProcess {
 
 pub fn probe() -> Result<Vec<QuotaBucket>, String> {
     let stop = AtomicBool::new(false);
-    read_quota(&mut None, &stop)
+    let epoch = AtomicU64::new(0);
+    let cancellation = QueryCancellation {
+        stop: &stop,
+        epoch: &epoch,
+        expected: 0,
+    };
+    read_quota(&mut None, &cancellation)?
+        .ok_or_else(|| "额度监测已停止。".to_string())
 }
 
 fn read_quota(
     process: &mut Option<CodexProcess>,
-    stop: &AtomicBool,
-) -> Result<Vec<QuotaBucket>, String> {
+    cancellation: &QueryCancellation<'_>,
+) -> Result<Option<Vec<QuotaBucket>>, String> {
     query_with_reconnect(
         process,
-        stop,
-        || CodexProcess::start(stop),
-        |process| normalize_quota(&process.request("account/rateLimits/read", None, stop)?),
+        cancellation,
+        || CodexProcess::start(cancellation),
+        |process| {
+            process
+                .request("account/rateLimits/read", None, cancellation)?
+                .map(|result| normalize_quota(&result))
+                .transpose()
+        },
     )
 }
 
@@ -355,6 +413,7 @@ pub struct CodexMonitor {
     wake: mpsc::SyncSender<()>,
     manual_requested: AtomicBool,
     stop: AtomicBool,
+    epoch: AtomicU64,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
@@ -367,6 +426,7 @@ impl CodexMonitor {
                 wake,
                 manual_requested: AtomicBool::new(false),
                 stop: AtomicBool::new(false),
+                epoch: AtomicU64::new(0),
                 worker: Mutex::new(None),
             }),
             receiver,
@@ -390,23 +450,22 @@ impl CodexMonitor {
         }
         state.refreshing = true;
         self.manual_requested.store(true, Ordering::Release);
-        drop(state);
         if !self.wake() {
             self.manual_requested.store(false, Ordering::Release);
-            if let Ok(mut state) = self.state.lock() {
-                state.refreshing = false;
-                state.error = Some("额度查询服务已停止，请重启 SysMon。".to_string());
-            }
+            state.refreshing = false;
+            state.error = Some("额度查询服务已停止，请重启 SysMon。".to_string());
             return false;
         }
         true
     }
     pub fn settings_changed(&self, enabled: bool) {
         if let Ok(mut state) = self.state.lock() {
-            state.enabled = enabled;
-            if !enabled {
+            if state.enabled != enabled {
+                self.epoch.fetch_add(1, Ordering::AcqRel);
+                state.enabled = enabled;
                 state.refreshing = false;
                 state.next_refresh_at_ms = None;
+                state.error = None;
                 self.manual_requested.store(false, Ordering::Release);
             }
         }
@@ -418,8 +477,54 @@ impl CodexMonitor {
             Ok(()) | Err(mpsc::TrySendError::Full(()))
         )
     }
+    fn cancellation(&self, expected: u64) -> QueryCancellation<'_> {
+        QueryCancellation {
+            stop: &self.stop,
+            epoch: &self.epoch,
+            expected,
+        }
+    }
+
+    fn commit_query(
+        &self,
+        expected: u64,
+        result: Result<Option<Vec<QuotaBucket>>, String>,
+        failures: &mut u32,
+    ) -> Option<u64> {
+        let mut state = self.state.lock().ok()?;
+        if !state.enabled || self.cancellation(expected).cancelled() {
+            return None;
+        }
+        let delay = match result {
+            Ok(Some(buckets)) => {
+                *failures = 0;
+                state.buckets = buckets;
+                state.observed_at_ms = Some(now_ms());
+                state.error = None;
+                REFRESH_SECS
+            }
+            Ok(None) => return None,
+            Err(error) => {
+                *failures = failures.saturating_add(1);
+                state.error = Some(error);
+                retry_delay_secs(*failures)
+            }
+        };
+        state.refreshing = false;
+        state.next_refresh_at_ms = Some(now_ms() + delay * 1000);
+        Some(delay)
+    }
+
     pub fn shutdown(&self) {
-        self.stop.store(true, Ordering::Relaxed);
+        if let Ok(mut state) = self.state.lock() {
+            self.stop.store(true, Ordering::Release);
+            self.epoch.fetch_add(1, Ordering::AcqRel);
+            state.refreshing = false;
+            state.next_refresh_at_ms = None;
+            self.manual_requested.store(false, Ordering::Release);
+        } else {
+            self.stop.store(true, Ordering::Release);
+        }
         self.wake();
         let worker = self.worker.lock().ok().and_then(|mut slot| slot.take());
         if let Some(worker) = worker {
@@ -483,7 +588,12 @@ fn alert_path() -> Option<PathBuf> {
         .and_then(|path| path.parent().map(|p| p.join("codex-alerts.json")))
 }
 
-fn notify(app: &tauri::AppHandle, monitor: &CodexMonitor, memory: &mut AlertMemory) {
+fn notify(
+    app: &tauri::AppHandle,
+    monitor: &CodexMonitor,
+    memory: &mut AlertMemory,
+    epoch: u64,
+) {
     let permitted = app
         .state::<SharedConfig>()
         .lock()
@@ -494,7 +604,13 @@ fn notify(app: &tauri::AppHandle, monitor: &CodexMonitor, memory: &mut AlertMemo
     if !permitted {
         return;
     }
-    let pending = pending_alerts(&monitor.snapshot(), memory, now_ms() / 1000);
+    let Ok(state) = monitor.state.lock() else {
+        return;
+    };
+    if monitor.cancellation(epoch).cancelled() || state.error.is_some() {
+        return;
+    }
+    let pending = pending_alerts(&state, memory, now_ms() / 1000);
     if pending.is_empty() {
         return;
     }
@@ -545,70 +661,60 @@ pub fn start_worker(
     monitor: Arc<CodexMonitor>,
     receiver: mpsc::Receiver<()>,
 ) {
+    if let Ok(config) = app.state::<SharedConfig>().lock() {
+        monitor.settings_changed(config.codex_enabled);
+    }
     let owner = Arc::clone(&monitor);
     let worker = std::thread::spawn(move || {
         let mut process: Option<CodexProcess> = None;
         let mut due = Instant::now();
         let mut failures: u32 = 0;
-        let mut was_enabled = false;
+        let mut worker_epoch = None;
         let mut memory = alert_path()
             .and_then(|path| std::fs::read(path).ok())
             .and_then(|raw| serde_json::from_slice(&raw).ok())
             .unwrap_or_default();
-        while !monitor.stop.load(Ordering::Relaxed) {
-            let enabled = app
-                .state::<SharedConfig>()
-                .lock()
-                .map(|cfg| cfg.codex_enabled)
-                .unwrap_or(false);
-            if let Ok(mut state) = monitor.state.lock() {
-                state.enabled = enabled;
-            }
-            let manual_requested = monitor.manual_requested.swap(false, Ordering::AcqRel);
-            if !enabled {
-                process = None;
-                if let Ok(mut state) = monitor.state.lock() {
-                    state.refreshing = false;
-                    state.next_refresh_at_ms = None;
+        while !monitor.stop.load(Ordering::Acquire) {
+            let mut reset_connection = false;
+            let query_epoch = {
+                let Ok(mut state) = monitor.state.lock() else {
+                    break;
+                };
+                let epoch = monitor.epoch.load(Ordering::Acquire);
+                if worker_epoch != Some(epoch) {
+                    reset_connection = true;
+                    failures = 0;
+                    due = Instant::now();
+                    worker_epoch = Some(epoch);
                 }
-                if was_enabled {
-                    crate::publish_codex_state(&app, &monitor);
-                }
-            } else if !was_enabled || manual_requested || Instant::now() >= due {
-                if let Ok(mut state) = monitor.state.lock() {
+                let manual = monitor.manual_requested.swap(false, Ordering::AcqRel);
+                if state.enabled
+                    && (manual || Instant::now() >= due)
+                    && !monitor.stop.load(Ordering::Acquire)
+                {
                     state.refreshing = true;
+                    Some(epoch)
+                } else {
+                    None
                 }
-                monitor.manual_requested.store(false, Ordering::Release);
+            };
+            if reset_connection {
+                process = None;
+            }
+            if let Some(epoch) = query_epoch {
                 crate::publish_codex_state(&app, &monitor);
-                let result = read_quota(&mut process, &monitor.stop);
-                let delay = match result {
-                    Ok(buckets) => {
-                        failures = 0;
-                        if let Ok(mut state) = monitor.state.lock() {
-                            state.buckets = buckets;
-                            state.observed_at_ms = Some(now_ms());
-                            state.error = None;
-                        }
-                        REFRESH_SECS
-                    }
-                    Err(error) => {
-                        process = None;
-                        failures = failures.saturating_add(1);
-                        if let Ok(mut state) = monitor.state.lock() {
-                            state.error = Some(error);
-                        }
-                        retry_delay_secs(failures)
-                    }
+                let result = read_quota(&mut process, &monitor.cancellation(epoch));
+                let succeeded = matches!(result, Ok(Some(_)));
+                let Some(delay) = monitor.commit_query(epoch, result, &mut failures) else {
+                    process = None;
+                    continue;
                 };
                 due = Instant::now() + Duration::from_secs(delay);
-                if let Ok(mut state) = monitor.state.lock() {
-                    state.refreshing = false;
-                    state.next_refresh_at_ms = Some(now_ms() + delay * 1000);
-                }
                 crate::publish_codex_state(&app, &monitor);
+                if succeeded {
+                    notify(&app, &monitor, &mut memory, epoch);
+                }
             }
-            was_enabled = enabled;
-            notify(&app, &monitor, &mut memory);
             if receiver.recv_timeout(Duration::from_secs(1)).is_ok() {
                 while receiver.try_recv().is_ok() {}
             }
@@ -637,49 +743,61 @@ mod tests {
         }
         let dropped = Arc::new(AtomicUsize::new(0));
         let stop = AtomicBool::new(false);
+        let epoch = AtomicU64::new(0);
+        let cancellation = QueryCancellation {
+            stop: &stop,
+            epoch: &epoch,
+            expected: 0,
+        };
         let mut connection = None;
         let mut connected = 0;
         let mut queried = Vec::new();
         let result = query_with_reconnect(
             &mut connection,
-            &stop,
+            &cancellation,
             || {
                 connected += 1;
-                Ok(Connection {
+                Ok(Some(Connection {
                     id: connected,
                     dropped: Arc::clone(&dropped),
-                })
+                }))
             },
             |connection| {
                 queried.push(connection.id);
                 if connection.id == 1 {
                     Err("旧连接断开".to_string())
                 } else {
-                    Ok(77)
+                    Ok(Some(77))
                 }
             },
         );
-        assert_eq!(result, Ok(77));
+        assert_eq!(result, Ok(Some(77)));
         assert_eq!(queried, vec![1, 2]);
         assert_eq!(connected, 2);
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
         let next = query_with_reconnect(
             &mut connection,
-            &stop,
-            || -> Result<Connection, String> { panic!("健康连接不应重建") },
-            |connection| Ok(connection.id),
+            &cancellation,
+            || -> Result<Option<Connection>, String> { panic!("健康连接不应重建") },
+            |connection| Ok(Some(connection.id)),
         );
-        assert_eq!(next, Ok(2));
+        assert_eq!(next, Ok(Some(2)));
     }
 
     #[test]
     fn repeated_failure_stops_after_one_reconnect_and_keeps_last_error() {
         let mut connection: Option<()> = None;
         let stop = AtomicBool::new(false);
+        let epoch = AtomicU64::new(0);
+        let cancellation = QueryCancellation {
+            stop: &stop,
+            epoch: &epoch,
+            expected: 0,
+        };
         let mut attempts = 0;
-        let result: Result<(), String> = query_with_reconnect(
+        let result: Result<Option<()>, String> = query_with_reconnect(
             &mut connection,
-            &stop,
+            &cancellation,
             || {
                 attempts += 1;
                 Err(format!("启动失败 {attempts}"))
@@ -694,18 +812,199 @@ mod tests {
     #[test]
     fn shutdown_prevents_reconnecting_after_a_failed_request() {
         let stop = AtomicBool::new(false);
+        let epoch = AtomicU64::new(0);
+        let cancellation = QueryCancellation {
+            stop: &stop,
+            epoch: &epoch,
+            expected: 0,
+        };
         let mut connection = Some(());
-        let result: Result<(), String> = query_with_reconnect(
+        let result: Result<Option<()>, String> = query_with_reconnect(
             &mut connection,
-            &stop,
+            &cancellation,
             || panic!("停止后不应创建连接"),
             |_| {
                 stop.store(true, Ordering::Relaxed);
                 Err("请求中断".to_string())
             },
         );
-        assert_eq!(result, Err("额度监测已停止。".to_string()));
+        assert_eq!(result, Ok(None));
         assert!(connection.is_none());
+    }
+
+    #[test]
+    fn disabling_interrupts_initialize_and_quota_waits_without_reconnecting() {
+        for method in ["initialize", "account/rateLimits/read"] {
+            let (monitor, _receiver) = CodexMonitor::new();
+            monitor.settings_changed(true);
+            let expected = monitor.epoch.load(Ordering::Acquire);
+            let (entered, waiting) = mpsc::channel();
+            let (sender, messages) = mpsc::channel();
+            let owner = Arc::clone(&monitor);
+            let worker = std::thread::spawn(move || {
+                let cancellation = owner.cancellation(expected);
+                let mut connection = if method == "initialize" { None } else { Some(()) };
+                let result = query_with_reconnect(
+                    &mut connection,
+                    &cancellation,
+                    || {
+                        assert_eq!(method, "initialize", "取消后不能重连");
+                        entered.send(()).unwrap();
+                        wait_response(&messages, 1, &cancellation).map(|value| value.map(|_| ()))
+                    },
+                    |_| {
+                        assert_ne!(method, "initialize", "取消初始化后不能发送额度查询");
+                        entered.send(()).unwrap();
+                        wait_response(&messages, 1, &cancellation).map(|value| value.map(|_| ()))
+                    },
+                );
+                assert!(connection.is_none());
+                result
+            });
+            waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+            monitor.settings_changed(false);
+            assert_eq!(worker.join().unwrap(), Ok(None));
+            drop(sender);
+            let state = monitor.snapshot();
+            assert!(!state.refreshing);
+            assert!(state.error.is_none());
+            assert!(state.next_refresh_at_ms.is_none());
+        }
+    }
+
+    #[test]
+    fn disable_after_failure_prevents_reconnect_and_drops_old_connection() {
+        let (monitor, _receiver) = CodexMonitor::new();
+        monitor.settings_changed(true);
+        let cancellation = monitor.cancellation(monitor.epoch.load(Ordering::Acquire));
+        struct Connection(Arc<AtomicBool>);
+        impl Drop for Connection {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut connection = Some(Connection(Arc::clone(&dropped)));
+        let result: Result<Option<()>, String> = query_with_reconnect(
+            &mut connection,
+            &cancellation,
+            || panic!("关闭后不应重连"),
+            |_| {
+                monitor.settings_changed(false);
+                Err("连接失败".to_string())
+            },
+        );
+        assert_eq!(result, Ok(None));
+        assert!(connection.is_none());
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn rapid_disable_enable_discards_old_results_and_recovers_immediately() {
+        let (monitor, _receiver) = CodexMonitor::new();
+        monitor.settings_changed(true);
+        let old_epoch = monitor.epoch.load(Ordering::Acquire);
+        let mut failures = 3;
+        let buckets = normalize_quota(&json!({"rateLimits":{"primary":{"usedPercent":81,"resetsAt":2000000000u64}}})).unwrap();
+        let mut connection = Some(1);
+        let result = query_with_reconnect(
+            &mut connection,
+            &monitor.cancellation(old_epoch),
+            || panic!("旧请求不应重连"),
+            |_| {
+                monitor.settings_changed(false);
+                monitor.settings_changed(true);
+                Ok(Some(buckets.clone()))
+            },
+        );
+        assert!(matches!(result, Ok(None)));
+        assert!(connection.is_none());
+        assert_eq!(
+            monitor.commit_query(old_epoch, Ok(Some(buckets.clone())), &mut failures),
+            None
+        );
+        assert_eq!(
+            monitor.commit_query(old_epoch, Err("迟到错误".to_string()), &mut failures),
+            None
+        );
+        assert_eq!(failures, 3);
+        let state = monitor.snapshot();
+        assert!(state.buckets.is_empty());
+        assert!(state.observed_at_ms.is_none());
+        assert!(state.error.is_none());
+        assert!(state.next_refresh_at_ms.is_none());
+        assert!(pending_alerts(&state, &AlertMemory::default(), 1000).is_empty());
+        let epoch = monitor.epoch.load(Ordering::Acquire);
+        let result = query_with_reconnect(
+            &mut connection,
+            &monitor.cancellation(epoch),
+            || Ok(Some(2)),
+            |connection| {
+                assert_eq!(*connection, 2);
+                Ok(Some(buckets.clone()))
+            },
+        );
+        assert_eq!(
+            monitor.commit_query(epoch, result, &mut failures),
+            Some(REFRESH_SECS)
+        );
+        assert_eq!(failures, 0);
+        assert_eq!(
+            monitor.snapshot().buckets[0].windows[0].remaining_percent,
+            Some(19.0)
+        );
+        assert!(monitor.snapshot().observed_at_ms.is_some());
+    }
+
+    #[test]
+    fn queued_response_from_old_epoch_is_not_accepted_after_reenable() {
+        let (monitor, _receiver) = CodexMonitor::new();
+        monitor.settings_changed(true);
+        let epoch = monitor.epoch.load(Ordering::Acquire);
+        let (sender, messages) = mpsc::channel();
+        sender.send(json!({"id":1,"result":{"old":true}})).unwrap();
+        monitor.settings_changed(false);
+        monitor.settings_changed(true);
+        assert_eq!(
+            wait_response(&messages, 1, &monitor.cancellation(epoch)),
+            Ok(None)
+        );
+        let epoch = monitor.epoch.load(Ordering::Acquire);
+        sender.send(json!({"id":2,"result":{"fresh":true}})).unwrap();
+        assert_eq!(
+            wait_response(&messages, 2, &monitor.cancellation(epoch)),
+            Ok(Some(json!({"fresh":true})))
+        );
+    }
+
+    #[test]
+    fn shutdown_interrupts_wait_and_rejects_late_worker_commit() {
+        let (monitor, _receiver) = CodexMonitor::new();
+        monitor.settings_changed(true);
+        let epoch = monitor.epoch.load(Ordering::Acquire);
+        let (entered, waiting) = mpsc::channel();
+        let (sender, messages) = mpsc::channel();
+        let owner = Arc::clone(&monitor);
+        let worker = std::thread::spawn(move || {
+            entered.send(()).unwrap();
+            assert_eq!(
+                wait_response(&messages, 1, &owner.cancellation(epoch)),
+                Ok(None)
+            );
+        });
+        *monitor.worker.lock().unwrap() = Some(worker);
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        monitor.shutdown();
+        drop(sender);
+        assert!(monitor.worker.lock().unwrap().is_none());
+        let mut failures = 0;
+        assert_eq!(
+            monitor.commit_query(epoch, Err("迟到错误".to_string()), &mut failures),
+            None
+        );
+        assert_eq!(failures, 0);
+        assert!(monitor.snapshot().error.is_none());
+        assert!(monitor.snapshot().next_refresh_at_ms.is_none());
     }
 
     #[test]
