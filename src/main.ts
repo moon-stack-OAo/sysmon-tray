@@ -577,7 +577,7 @@ function drawHistoryChart(points: HistoryPoint[]) {
   );
   drawSeries(
     drawPoints.map((p) => p.memoryPercent),
-    '#5fc992',
+    '#4cc38a',
     yPercent,
   );
   if (hasGpu) {
@@ -597,7 +597,7 @@ function drawHistoryChart(points: HistoryPoint[]) {
   if (hasFan) {
     drawSeries(
       drawPoints.map((p) => p.fanRpm),
-      '#c084fc',
+      '#7ec8e3',
       yFan,
     );
   }

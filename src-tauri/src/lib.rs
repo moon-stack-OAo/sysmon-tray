@@ -843,10 +843,15 @@ fn validated_overlay_width(
     if !width.is_finite() || width <= 0.0 {
         return Err("叠加层宽度必须是有限正数".to_string());
     }
-    if mode != OverlayLayoutMode::Collapsed || style == OverlayStyle::Vertical {
+    if mode != OverlayLayoutMode::Collapsed {
         return Ok(None);
     }
-    Ok(Some(width.ceil().clamp(48.0, 4096.0) as u32))
+    let min_width = if style == OverlayStyle::Vertical {
+        OVERLAY_VERTICAL_WIDTH as f64
+    } else {
+        48.0
+    };
+    Ok(Some(width.ceil().clamp(min_width, 4096.0) as u32))
 }
 
 fn apply_overlay_layout(mode: OverlayLayoutMode, app: &AppHandle) -> Result<(), String> {
@@ -2024,19 +2029,30 @@ mod overlay_layout_tests {
     use super::*;
 
     #[test]
-    fn measured_width_is_validated_and_only_applies_to_horizontal_collapsed() {
+    fn measured_width_is_validated_for_collapsed_shapes() {
         let collapsed = OverlayLayoutMode::Collapsed;
         let capsule = OverlayStyle::Capsule;
         assert_eq!(validated_overlay_width(collapsed, capsule, Some(123.2)), Ok(Some(124)));
         assert_eq!(validated_overlay_width(collapsed, capsule, Some(1.0)), Ok(Some(48)));
         assert_eq!(validated_overlay_width(collapsed, capsule, Some(99999.0)), Ok(Some(4096)));
+        assert_eq!(
+            validated_overlay_width(collapsed, OverlayStyle::Vertical, Some(90.2)),
+            Ok(Some(91))
+        );
+        assert_eq!(
+            validated_overlay_width(collapsed, OverlayStyle::Vertical, Some(12.0)),
+            Ok(Some(OVERLAY_VERTICAL_WIDTH))
+        );
         for width in [f64::NAN, f64::INFINITY, -1.0, 0.0] {
             assert!(validated_overlay_width(collapsed, capsule, Some(width)).is_err());
         }
         assert_eq!(validated_overlay_width(collapsed, capsule, None), Ok(None));
-        assert_eq!(validated_overlay_width(collapsed, OverlayStyle::Vertical, Some(200.0)), Ok(None));
         for mode in [OverlayLayoutMode::Expanded, OverlayLayoutMode::Peek] {
             assert_eq!(validated_overlay_width(mode, capsule, Some(200.0)), Ok(None));
+            assert_eq!(
+                validated_overlay_width(mode, OverlayStyle::Vertical, Some(200.0)),
+                Ok(None)
+            );
         }
     }
 

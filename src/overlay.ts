@@ -391,9 +391,15 @@ function enqueueLayout(task: () => Promise<void>): Promise<void> {
 }
 
 function measureCollapsedWidth(): number | undefined {
-  if (mode !== 'collapsed' || style === 'vertical') return undefined;
+  if (mode !== 'collapsed') return undefined;
   const root = document.querySelector<HTMLElement>('#overlay-root');
-  const strip = root?.querySelector<HTMLElement>(style === 'numeric' ? '.numeric-strip' : '.strip');
+  const strip = root?.querySelector<HTMLElement>(
+    style === 'vertical'
+      ? '.vertical-strip'
+      : style === 'numeric'
+        ? '.numeric-strip'
+        : '.strip',
+  );
   if (!root || !strip) return undefined;
   const css = getComputedStyle(root);
   const extra = [
@@ -450,7 +456,9 @@ function initializeContentSizing() {
     attributeFilter: ['hidden'],
   });
   const resize = new ResizeObserver(scheduleWidthMeasurement);
-  root.querySelectorAll('.strip, .numeric-strip').forEach((strip) => resize.observe(strip));
+  root
+    .querySelectorAll('.strip, .numeric-strip, .vertical-strip')
+    .forEach((strip) => resize.observe(strip));
   void document.fonts.ready.then(scheduleWidthMeasurement);
   document.fonts.addEventListener('loadingdone', scheduleWidthMeasurement);
   window.addEventListener('beforeunload', () => {

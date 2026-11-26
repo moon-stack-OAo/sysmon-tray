@@ -21,7 +21,7 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
-  margin-top: 9px;
+  margin-top: 8px;
 }
 .quota-window {
   min-width: 0;
@@ -30,14 +30,15 @@
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  gap: 6px;
-  font-size: 10px;
+  gap: 8px;
+  font-size: 11px;
   color: var(--muted);
 }
 .quota-value {
   color: var(--success);
   font-family: var(--font-mono);
   font-size: 16px;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
 }
 .quota-track {
@@ -45,7 +46,7 @@
   background: var(--track, rgba(255, 255, 255, 0.06));
   border-radius: 8px;
   overflow: hidden;
-  margin-top: 5px;
+  margin-top: 4px;
 }
 .quota-fill {
   height: 100%;
@@ -54,8 +55,8 @@
   transition: width 200ms ease;
 }
 .quota-reset {
-  font-size: 9px;
-  line-height: 1.6;
+  font-size: 10px;
+  line-height: 1.5;
   color: var(--muted);
   margin-top: 4px;
 }
@@ -85,14 +86,14 @@
 }
 .quota-note {
   color: var(--meta);
-  font-size: 9px;
+  font-size: 10px;
   line-height: 1.5;
   margin-top: 8px;
 }
 .overlay .quota-card {
   border-top: 1px solid var(--border);
   padding-top: 8px;
-  margin-top: 5px;
+  margin-top: 4px;
 }
 .overlay .quota-card .metric-top {
   display: flex;
@@ -102,10 +103,11 @@
 .quota-refresh {
   border: 1px solid var(--border-strong);
   color: var(--muted);
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--surface-2);
-  padding: 2px 6px;
+  padding: 2px 8px;
   font-size: 10px;
+  font-weight: 500;
   cursor: pointer;
 }
 .quota-refresh:disabled {
@@ -145,8 +147,10 @@
   align-items: flex-start;
   gap: 1px;
   white-space: nowrap;
+  min-width: max-content;
 }
 .vertical-strip .quota-reset-short {
   font-size: 9px;
   line-height: 11px;
+  white-space: nowrap;
 }

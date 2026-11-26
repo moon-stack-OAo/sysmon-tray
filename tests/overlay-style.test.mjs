@@ -194,11 +194,11 @@ test('horizontal separator widths match the backend spacing budget', () => {
   assert.equal(cssDeclarations('.num-sep').flex, '0 0 6px');
 });
 
-test('vertical and expanded panel spacing stays unchanged', () => {
-  assert.equal(cssDeclarations('.overlay.collapsed.style-vertical').padding, '8px 6px');
-  assert.equal(cssDeclarations('.vertical-strip').gap, '6px');
-  assert.equal(cssDeclarations('.overlay:not(.collapsed):not(.peek)').padding, '8px 10px');
-  assert.equal(cssDeclarations('.overlay:not(.collapsed):not(.peek)').gap, '6px');
+test('vertical and expanded panel spacing stays on the 4px grid', () => {
+  assert.equal(cssDeclarations('.overlay.collapsed.style-vertical').padding, '8px 8px');
+  assert.equal(cssDeclarations('.vertical-strip').gap, '8px');
+  assert.equal(cssDeclarations('.overlay:not(.collapsed):not(.peek)').padding, '8px 12px');
+  assert.equal(cssDeclarations('.overlay:not(.collapsed):not(.peek)').gap, '8px');
 });
 
 test('a shape change leaves the peek hot zone and updates both layout and classes', async () => {
@@ -348,19 +348,46 @@ test('growth is immediate but shrinking waits and coalesces current content', as
 });
 
 test('a queued measurement cannot restore collapsed after a newer layout request', async () => {
-  for (const next of ['expanded', 'peek', 'vertical']) {
+  for (const next of ['expanded', 'peek']) {
     const view = fixture();
     await view.context.applyOverlayStyle('capsule');
     view.setContentWidth(180);
     const measurement = view.context.fitCollapsedWidth();
-    const transition = next === 'vertical'
-      ? view.context.applyOverlayStyle(next)
-      : view.context.setMode(next);
+    const transition = view.context.setMode(next);
     await Promise.all([measurement, transition]);
     assert.equal(view.layouts().filter(({ args }) => args.width === 200).length, 0);
     assert.equal(view.layouts().at(-1).args.width, undefined);
     assert.equal(view.timers.size, 0);
   }
+
+  const vertical = fixture();
+  await vertical.context.applyOverlayStyle('capsule');
+  vertical.setContentWidth(180);
+  const measurement = vertical.context.fitCollapsedWidth();
+  vertical.setContentWidth(100);
+  const transition = vertical.context.applyOverlayStyle('vertical');
+  await Promise.all([measurement, transition]);
+  assert.equal(vertical.layouts().filter(({ args }) => args.width === 200).length, 0);
+  assert.equal(vertical.layouts().at(-1).args.width, 120);
+  assert.equal(vertical.timers.size, 0);
+});
+
+test('vertical strips measure content width and keep reset text unclipped', async () => {
+  const view = fixture();
+  await view.context.applyOverlayStyle('vertical');
+  assert.equal(view.layouts().at(-1).args.width, 120);
+  view.setContentWidth(96);
+  await view.context.fitCollapsedWidth();
+  assert.equal(view.layouts().at(-1).args.width, 120);
+  view.setContentWidth(110);
+  await view.context.fitCollapsedWidth();
+  assert.equal(view.layouts().at(-1).args.width, 136);
+  assert.equal(
+    cssDeclarations('.overlay.collapsed.style-vertical .vertical-strip').width,
+    'max-content',
+  );
+  assert.equal(cssDeclarations('.vertical-strip .quota-reset-short')['text-overflow'], 'clip');
+  assert.equal(cssDeclarations('.vertical-strip .quota-reset-short').overflow, 'visible');
 });
 
 test('a failed width application can retry and does not poison layout serialization', async () => {
